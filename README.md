@@ -10,6 +10,21 @@ A launcher for macOS that searches apps and clipboard history. It uses native Ap
 
 Build and install with `./build.sh install`, which runs the fuzzy-match check, builds, and copies the app to `~/Applications`.
 
-To add a plugin, write a class that conforms to `Source` (in `Sources/Launcher.swift`), add it to the list in `Sources/main.swift`, and give it a hotkey.
+## Plugins
+
+Every feature is a plugin in `Sources/Plugins/`. The contract lives in `Sources/Plugin.swift`. A plugin conforms to `Plugin`, and in `register(in:)` it tells the registry what it adds:
+
+- `add(search:)` adds results to the main search. Apps and the calculator do this.
+- `add(page:)` adds a page with its own list, an optional hotkey and an optional preview. Clipboard History does this. Every page also shows up as a command in the main search.
+- `add(command:)` adds a named action to the main search, like Quit Hop.
+
+```swift
+final class EmojiPlugin: Plugin, SearchProvider {
+    func register(in hop: PluginRegistry) { hop.add(search: self) }
+    func search(_ query: String) -> [Item] { ... }
+}
+```
+
+To turn it on, add it to the `PluginManager([...])` list in `Sources/main.swift`. That list's order is also the order of results in the main search. No other file changes.
 
 Pasting straight into the frontmost app needs Accessibility permission. Without it, Enter only copies the entry. The build is signed ad hoc, so each rebuild resets that permission and you have to toggle Hop off and on again in System Settings.

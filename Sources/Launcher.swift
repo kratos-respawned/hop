@@ -1,36 +1,5 @@
 import AppKit
 
-struct Item {
-    let title: String
-    var subtitle = ""
-    var badge = ""
-    var action = ""
-    var staysOpen = false
-    var preview: Preview?
-    var section: String?
-    let icon: () -> NSImage?
-    let run: () -> Void
-}
-
-enum Preview {
-    case text(String)
-    case image(URL)
-    case calculation(expression: String, result: String)
-}
-
-protocol Source: AnyObject {
-    var name: String { get }
-    var icon: NSImage { get }
-    var placeholder: String { get }
-    var actionName: String { get }
-    var hasPreview: Bool { get }
-    func search(_ query: String) -> [Item]
-}
-
-extension Source {
-    var hasPreview: Bool { false }
-}
-
 final class Panel: NSPanel {
     override var canBecomeKey: Bool { true }
 
@@ -46,7 +15,7 @@ final class Panel: NSPanel {
 }
 
 final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
-    private let sources: [Source]
+    private let pages: [Page]
     private var current = 0
     private var openedFromSearch = false
     private var results: [Item] = []
@@ -62,26 +31,27 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
     private let actionHint = label(12, .medium, .secondaryLabelColor)
     private let switchHint = label(12, .medium, .secondaryLabelColor)
     private let listWidthWithPreview: CGFloat = 330
+    private let previewCharacterLimit = 20_000
     private let previewScroll = NSTextView.scrollableTextView()
     private var previewText: NSTextView { previewScroll.documentView as! NSTextView }
     private let previewImage = NSImageView()
     private let previewDivider = NSBox()
 
-    init(sources: [Source]) {
-        self.sources = sources
+    init(pages: [Page]) {
+        self.pages = pages
         panel = Panel(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
                       styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         super.init()
         buildPanel()
     }
 
-    func toggle(_ index: Int) {
+    func toggle(_ page: Page) {
+        guard let index = pages.firstIndex(where: { $0 === page }) else { return }
         if panel.isVisible && current == index { return hide() }
         current = index
-        let source = sources[index]
         field.stringValue = ""
-        field.placeholderString = source.placeholder
-        switchHint.stringValue = sources[(index + 1) % sources.count].name
+        field.placeholderString = page.placeholder
+        switchHint.stringValue = pages[(index + 1) % pages.count].name
         refresh()
         if panel.isVisible { return }
         let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main!
@@ -99,15 +69,15 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
     }
 
     private func goBack() {
-        if openedFromSearch { toggle(0) } else { hide() }
+        if openedFromSearch { toggle(pages[0]) } else { hide() }
         openedFromSearch = false
     }
 
     private func refresh() {
         let query = field.stringValue.trimmingCharacters(in: .whitespaces)
-        results = commands(matching: query) + sources[current].search(query)
-        header.stringValue = results.first?.section ?? sources[current].name
-        layoutList(withPreview: sources[current].hasPreview || results.first?.preview != nil)
+        results = pages[current].search(query)
+        header.stringValue = results.first?.section ?? pages[current].name
+        layoutList(withPreview: pages[current].hasPreview || results.first?.preview != nil)
         table.reloadData()
         emptyState.isHidden = !results.isEmpty
         resultCount.stringValue = "\(results.count) result\(results.count == 1 ? "" : "s")"
@@ -124,28 +94,11 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
         previewDivider.isHidden = !withPreview
     }
 
-    private func commands(matching query: String) -> [Item] {
-        guard current == 0 && query.count >= 2 else { return [] }
-        let plugins = sources.indices.dropFirst().map { index in
-            Item(title: sources[index].name, badge: "Command", action: "Open", staysOpen: true, section: "Commands",
-                 icon: { [unowned self] in sources[index].icon },
-                 run: { [unowned self] in
-                     toggle(index)
-                     openedFromSearch = true
-                 })
-        }
-        let quit = Item(title: "Quit Hop", badge: "Command", action: "Quit", section: "Commands",
-                        icon: { tile("power", .systemRed) },
-                        run: { NSApp.terminate(nil) })
-        // Above 600 means a prefix, word-start or initials match, so loose matches don't push commands over apps.
-        return (plugins + [quit]).filter { (fuzzyScore(query, $0.title) ?? 0) > 600 }
-    }
-
     private func showSelection() {
         let row = table.selectedRow
         let item = results.indices.contains(row) ? results[row] : nil
         let action = item?.action ?? ""
-        actionHint.stringValue = action.isEmpty ? sources[current].actionName : action
+        actionHint.stringValue = action.isEmpty ? pages[current].actionName : action
 
         previewScroll.isHidden = true
         previewImage.isHidden = true
@@ -153,9 +106,8 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
         case .text(let text):
             let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
                                                              .foregroundColor: NSColor.labelColor]
-            // shortcut: shows the first 20k characters, enough for a glance; add paging if huge clips matter.
-            showPreviewText(NSAttributedString(string: String(text.prefix(20_000)), attributes: attributes), inset: NSSize(width: 14, height: 14))
-        case .calculation(let expression, let result):
+            showPreviewText(NSAttributedString(string: String(text.prefix(previewCharacterLimit)), attributes: attributes), inset: NSSize(width: 14, height: 14))
+        case .answer(let expression, let result):
             let centered = NSMutableParagraphStyle()
             centered.alignment = .center
             let text = NSMutableAttributedString(string: expression + "\n\n", attributes: [
@@ -184,19 +136,28 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
         guard !results.isEmpty else { return }
         let row = max(0, min(results.count - 1, row))
         table.selectRowIndexes([row], byExtendingSelection: false)
-        let clip = scroll.contentView, rowRect = table.rect(ofRow: row)
-        var top = clip.bounds.minY
+        scrollInstantly(toShow: row)
+    }
+
+    // Not scrollRowToVisible: its animation lags behind a held arrow key.
+    private func scrollInstantly(toShow row: Int) {
+        let visible = scroll.contentView, rowRect = table.rect(ofRow: row)
+        var top = visible.bounds.minY
         if rowRect.minY < top { top = rowRect.minY }
-        if rowRect.maxY > top + clip.bounds.height { top = rowRect.maxY - clip.bounds.height }
-        // Jump instead of scrollRowToVisible's animation, which lags behind key repeat.
-        clip.scroll(to: NSPoint(x: 0, y: top))
-        scroll.reflectScrolledClipView(clip)
+        if rowRect.maxY > top + visible.bounds.height { top = rowRect.maxY - visible.bounds.height }
+        visible.scroll(to: NSPoint(x: 0, y: top))
+        scroll.reflectScrolledClipView(visible)
     }
 
     @objc private func runSelected() {
         guard results.indices.contains(table.selectedRow) else { return }
         let item = results[table.selectedRow]
-        if !item.staysOpen { hide() }
+        if let page = item.opens {
+            toggle(page)
+            openedFromSearch = true
+            return
+        }
+        hide()
         item.run()
     }
 
@@ -209,7 +170,7 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
         case #selector(NSResponder.insertNewline(_:)): runSelected()
         case #selector(NSResponder.cancelOperation(_:)): goBack()
         case #selector(NSResponder.deleteBackward(_:)) where field.stringValue.isEmpty && openedFromSearch: goBack()
-        case #selector(NSResponder.insertTab(_:)): toggle((current + 1) % sources.count)
+        case #selector(NSResponder.insertTab(_:)): toggle(pages[(current + 1) % pages.count])
         default: return false
         }
         return true
@@ -339,131 +300,3 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
     }
 }
 
-private var tiles: [String: NSImage] = [:]
-
-// macOS app icons fill about 80% of their square, so tiles and thumbnails keep the same margin to sit level with them.
-private let iconBox = NSRect(x: 0, y: 0, width: 26, height: 26).insetBy(dx: 2.5, dy: 2.5)
-
-func tile(_ symbol: String, _ color: NSColor) -> NSImage {
-    if let cached = tiles[symbol] { return cached }
-    let image = NSImage(size: NSSize(width: 26, height: 26), flipped: false) { _ in
-        let shape = NSBezierPath(roundedRect: iconBox, xRadius: 5, yRadius: 5)
-        NSGradient(starting: color.blended(withFraction: 0.3, of: .white) ?? color, ending: color)?.draw(in: shape, angle: -90)
-        let style = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold).applying(.init(paletteColors: [.white]))
-        if let glyph = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(style) {
-            glyph.draw(in: NSRect(x: iconBox.midX - glyph.size.width / 2, y: iconBox.midY - glyph.size.height / 2,
-                                  width: glyph.size.width, height: glyph.size.height))
-        }
-        return true
-    }
-    tiles[symbol] = image
-    return image
-}
-
-func framed(_ picture: NSImage) -> NSImage {
-    NSImage(size: NSSize(width: 26, height: 26), flipped: false) { _ in
-        NSBezierPath(roundedRect: iconBox, xRadius: 5, yRadius: 5).addClip()
-        let scale = max(iconBox.width / picture.size.width, iconBox.height / picture.size.height)
-        let size = NSSize(width: picture.size.width * scale, height: picture.size.height * scale)
-        picture.draw(in: NSRect(x: iconBox.midX - size.width / 2, y: iconBox.midY - size.height / 2, width: size.width, height: size.height))
-        return true
-    }
-}
-
-private func label(_ size: CGFloat, _ weight: NSFont.Weight = .regular, _ color: NSColor = .labelColor) -> NSTextField {
-    let field = NSTextField(labelWithString: "")
-    field.font = .systemFont(ofSize: size, weight: weight)
-    field.textColor = color
-    field.lineBreakMode = .byTruncatingTail
-    return field
-}
-
-final class Decoration: NSView {
-    init(frame: NSRect, fill: NSColor = .clear, border: NSColor = .clear, radius: CGFloat = 0) {
-        super.init(frame: frame)
-        wantsLayer = true
-        layer?.backgroundColor = fill.cgColor
-        layer?.borderColor = border.cgColor
-        layer?.borderWidth = border == .clear ? 0 : 1
-        layer?.cornerRadius = radius
-        translatesAutoresizingMaskIntoConstraints = frame == .zero ? false : true
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-}
-
-final class Pill: NSView {
-    let text = label(11, .medium, .secondaryLabelColor)
-
-    init(_ string: String) {
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.cornerRadius = 5
-        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.1).cgColor
-        text.stringValue = string
-        text.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(text)
-        NSLayoutConstraint.activate([
-            text.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 7),
-            text.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
-            text.topAnchor.constraint(equalTo: topAnchor, constant: 3),
-            text.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3),
-        ])
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-}
-
-final class Row: NSTableRowView {
-    override var isEmphasized: Bool { get { false } set {} }
-
-    override func drawSelection(in dirtyRect: NSRect) {
-        NSColor.white.withAlphaComponent(0.1).setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 2), xRadius: 8, yRadius: 8).fill()
-    }
-}
-
-final class Cell: NSTableCellView {
-    static let id = NSUserInterfaceItemIdentifier("cell")
-    private let icon = NSImageView()
-    private let title = label(14, .medium)
-    private let subtitle = label(13, .regular, .secondaryLabelColor)
-    private let badge = Pill("")
-
-    init() {
-        super.init(frame: .zero)
-        identifier = Cell.id
-        icon.imageScaling = .scaleProportionallyUpOrDown
-        icon.contentTintColor = .secondaryLabelColor
-        title.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-        title.setContentCompressionResistancePriority(.init(251), for: .horizontal)
-        subtitle.setContentHuggingPriority(.init(1), for: .horizontal)
-        subtitle.setContentCompressionResistancePriority(.init(250), for: .horizontal)
-
-        let row = NSStackView(views: [icon, title, subtitle, badge])
-        row.distribution = .fill
-        row.spacing = 12
-        row.setCustomSpacing(8, after: title)
-        row.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(row)
-        NSLayoutConstraint.activate([
-            icon.widthAnchor.constraint(equalToConstant: 26),
-            icon.heightAnchor.constraint(equalToConstant: 26),
-            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 20),
-            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
-            row.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    func show(_ item: Item) {
-        title.stringValue = item.title
-        subtitle.stringValue = item.subtitle
-        badge.text.stringValue = item.badge
-        badge.isHidden = item.badge.isEmpty
-        icon.image = item.icon()
-    }
-}
