@@ -97,3 +97,25 @@ final class Cell: NSTableCellView {
         icon.image = item.icon()
     }
 }
+
+final class SectionHeader: NSTableCellView {
+    static let id = NSUserInterfaceItemIdentifier("section")
+    private let title = label(12, .semibold, .secondaryLabelColor)
+
+    init() {
+        super.init(frame: .zero)
+        identifier = SectionHeader.id
+        title.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(title)
+        NSLayoutConstraint.activate([
+            title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 22),
+            title.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func show(_ text: String) {
+        title.stringValue = text
+    }
+}

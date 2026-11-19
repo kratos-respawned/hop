@@ -5,7 +5,9 @@ mkdir -p build/Hop.app/Contents/MacOS
 swiftc checks/main.swift Sources/Fuzzy.swift Sources/Plugins/Math.swift -o build/check && build/check
 cp Info.plist build/Hop.app/Contents/
 swiftc -O Sources/*.swift Sources/Plugins/*.swift -o build/Hop.app/Contents/MacOS/Hop
-codesign -s - --force build/Hop.app
+# A real identity keeps the same designated requirement across builds, so macOS keeps Hop's permissions.
+identity=$(security find-identity -v -p codesigning | awk '/Apple Development/ { print $2; exit }')
+codesign -s "${identity:--}" --force build/Hop.app
 if [ "$1" = "install" ]; then
   pkill -x Hop || true
   rm -rf ~/Applications/Hop.app && mkdir -p ~/Applications && cp -R build/Hop.app ~/Applications/
