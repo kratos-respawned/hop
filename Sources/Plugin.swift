@@ -16,6 +16,7 @@ enum Preview {
     case text(String)
     case image(URL)
     case answer(question: String, answer: String)
+    case code(String)
 }
 
 struct Command {

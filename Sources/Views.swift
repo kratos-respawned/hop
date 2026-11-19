@@ -61,10 +61,12 @@ final class Cell: NSTableCellView {
     private let title = label(14, .medium)
     private let subtitle = label(13, .regular, .secondaryLabelColor)
     private let badge = Pill("")
+    private let shortcut = label(12, .medium, .secondaryLabelColor)
 
     init() {
         super.init(frame: .zero)
         identifier = Cell.id
+        shortcut.isHidden = true
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.contentTintColor = .secondaryLabelColor
         title.setContentHuggingPriority(.defaultHigh, for: .horizontal)
@@ -72,7 +74,7 @@ final class Cell: NSTableCellView {
         subtitle.setContentHuggingPriority(.init(1), for: .horizontal)
         subtitle.setContentCompressionResistancePriority(.init(250), for: .horizontal)
 
-        let row = NSStackView(views: [icon, title, subtitle, badge])
+        let row = NSStackView(views: [icon, title, subtitle, badge, shortcut])
         row.distribution = .fill
         row.spacing = 12
         row.setCustomSpacing(8, after: title)
@@ -95,6 +97,12 @@ final class Cell: NSTableCellView {
         badge.text.stringValue = item.badge
         badge.isHidden = item.badge.isEmpty
         icon.image = item.icon()
+        showShortcut(nil)
+    }
+
+    func showShortcut(_ number: Int?) {
+        shortcut.stringValue = number.map { "⌘\($0)" } ?? ""
+        shortcut.isHidden = number == nil
     }
 }
 
