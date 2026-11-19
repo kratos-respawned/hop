@@ -25,28 +25,28 @@ enum Calculator {
                                                              "÷": "/", "^": "^", "%": "%", "(": "(", ")": ")"]
 
     private static func tokenize(_ text: String) -> [Token]? {
-        var tokens: [Token] = [], i = text.startIndex
+        var tokens: [Token] = [], index = text.startIndex
         func scan(while matches: (Character) -> Bool) -> Substring {
-            let start = i
-            while i < text.endIndex && matches(text[i]) { i = text.index(after: i) }
-            return text[start..<i]
+            let start = index
+            while index < text.endIndex && matches(text[index]) { index = text.index(after: index) }
+            return text[start..<index]
         }
-        while i < text.endIndex {
-            let c = text[i]
-            if c.isWhitespace {
-                i = text.index(after: i)
-            } else if c.isNumber || c == "." {
-                guard let n = Double(scan { $0.isNumber || $0 == "." || $0 == "," }.replacingOccurrences(of: ",", with: "")) else { return nil }
-                tokens.append(.number(n))
-            } else if c.isLetter {
+        while index < text.endIndex {
+            let char = text[index]
+            if char.isWhitespace {
+                index = text.index(after: index)
+            } else if char.isNumber || char == "." {
+                guard let number = Double(scan { $0.isNumber || $0 == "." || $0 == "," }.replacingOccurrences(of: ",", with: "")) else { return nil }
+                tokens.append(.number(number))
+            } else if char.isLetter {
                 switch scan(while: \.isLetter).lowercased() {
                 case "x": tokens.append(.op("*"))
                 case let word where word == "of" || word == "off": tokens.append(.word(word))
                 default: return nil
                 }
-            } else if let op = operators[c] {
+            } else if let op = operators[char] {
                 tokens.append(.op(op))
-                i = text.index(after: i)
+                index = text.index(after: index)
             } else {
                 return nil
             }
@@ -60,7 +60,6 @@ enum Calculator {
         var plain: Double { isPercent ? number / 100 : number }
     }
 
-    // Percent rules follow Raycast: "150 + 10%" = 165, "20% of 150" = 30, "20% off 150" = 120.
     private struct Parser {
         let tokens: [Token]
         var pos = 0

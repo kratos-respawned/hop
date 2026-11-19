@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import CryptoKit
 
 enum Clip: Codable, Equatable {
@@ -13,18 +14,21 @@ enum Clip: Codable, Equatable {
     }
 }
 
-final class ClipboardSource: Source {
+final class ClipboardPlugin: Plugin, Page {
     let name = "Clipboard History"
     let icon = tile("doc.on.clipboard.fill", .systemPurple)
     let placeholder = "Search clipboard history"
     let actionName = "Paste"
     let hasPreview = true
+    let hotkey: HotKey? = HotKey(key: kVK_ANSI_V, modifiers: optionKey)
     private var history: [Clip]
     private var thumbnails: [String: NSImage] = [:]
     private var lastChange = NSPasteboard.general.changeCount
     private let file: URL
     private let imagesDir: URL
     private let limit = 300
+    private let keepPollingWhileHidden = ProcessInfo.processInfo.beginActivity(
+        options: .userInitiatedAllowingIdleSystemSleep, reason: "stop App Nap from pausing clipboard polling")
     private static let skippedTypes: Set<NSPasteboard.PasteboardType> = [
         .init("org.nspasteboard.ConcealedType"), .init("org.nspasteboard.TransientType"),
     ]
@@ -40,6 +44,10 @@ final class ClipboardSource: Source {
             ?? []
         let timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.poll() }
         timer.tolerance = 0.2
+    }
+
+    func register(in hop: PluginRegistry) {
+        hop.add(page: self)
     }
 
     func search(_ query: String) -> [Item] {
@@ -131,11 +139,4 @@ final class ClipboardSource: Source {
             }
         }
     }
-}
-
-func thumbnail(of url: URL, maxPixels: Int) -> NSImage? {
-    let options = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: maxPixels] as CFDictionary
-    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-          let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options) else { return nil }
-    return NSImage(cgImage: image, size: NSSize(width: image.width / 2, height: image.height / 2))
 }
