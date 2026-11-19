@@ -1,30 +1,150 @@
+<div align="center">
+
+<img src="docs/icon.png" width="128" alt="Hop icon">
+
 # Hop
 
-A launcher for macOS that searches apps and clipboard history. It uses native AppKit, has no dependencies, and the binary is about 180KB.
+**A blazingly fast, native macOS launcher. ⚡**
 
-- `⌥ Space` searches apps. Matching is fuzzy, with prefixes, word starts and initials (`vsc`, `ws`), and apps you launch often rank higher.
-- `⌥ V` opens clipboard history: text and images, the last 300 entries, with a preview of the selected entry on the right. Items that password managers mark as concealed are not saved.
-- The app search also answers math (`2^10`, `(3+4)*2`), percentages (`150 + 10%`, `20% of 150`, `20% off 150`) and currency (`100 usd to inr`, `$50 in eur`). Enter copies the answer and saves it, and your last 7 calculations show under the answer, with a large preview on the right. Exchange rates come from open.er-api.com, refresh every 6 hours, and are saved for offline use.
-- Paste a JWT, Base64, an epoch (seconds or milliseconds) or an ISO date into the app search to decode it. Each gives one row with a preview on the right. A date shows IST, UTC, epoch, epoch ms and how long ago, and Enter copies the IST time. A JWT row shows its expiry, the preview shows the colored payload with IST next to `exp`, `iat` and `nbf`, and Enter copies the payload JSON. Base64 previews the decoded text, formatted when it is JSON. `now` gives the current epoch. Base64 only shows when it decodes to readable text, so plain words never trigger it.
-- Type `define serendipity` (or `def ran`) for a dictionary entry from the Mac's built-in Oxford dictionary, the same one Dictionary.app uses, offline. One row shows the word and its first meaning, and the preview lays out the whole entry: pronunciation, each part of speech with numbered senses and examples, derivatives and origin. Enter opens it in Dictionary. The lookup runs off the main thread and fills in a moment later.
-- Paste a YouTube, Instagram, X, Reddit, Vimeo, TikTok or similar link into the app search to download it with yt-dlp (`brew install yt-dlp ffmpeg`). The rows offer the video, the video with SponsorBlock cutting sponsor, self-promo and subscribe reminders, the video with those marked as chapters instead, or audio only. Enter then lists the qualities the video really has, with their sizes, 1080p first. Up to 1080p it picks h264, which plays everywhere. Above that YouTube only has AV1 or VP9, and QuickTime plays AV1 only on M3 or newer. Audio comes as m4a (no re-encode) or mp3. The preview shows the thumbnail, title, channel, length and how much of the video SponsorBlock marks as sponsors, so you can pick. That check sends SponsorBlock only the first 4 characters of a hash of the video ID. Files go to ~/Downloads, the Downloads page (type `downloads`) shows progress and stops or reveals them, and a notification says when one finishes. Lookups, calculations, decodes and downloads don't go into Recent.
-- Claude Manager (type `claude`) lists every running Claude Code session with its folder, whether it's working or idle, and how many subagents are working. Enter caffeinates a session, which keeps the Mac awake even with the lid closed. When that session finishes and waits for its next prompt, or exits, Hop decafs it. If the lid is closed by then, the Mac goes to sleep. The first caffeinate asks for your password once, to add `/etc/sudoers.d/hop`. That rule lets your user run only `pmset -a disablesleep 1`, `pmset -a disablesleep 0` and `pmset sleepnow` without a password, because only root can stop lid-close sleep. A caffeinated session shows `☕ caffeinated` in its Claude status line, through `scripts/claude-status.sh`.
-- Worktree Manager (type `worktree`) lists every repo in `~/Desktop/work` with its worktrees, their size, and how much of that is build artifacts. Each worktree has a merge badge, checked with git after a fetch: In main or In uat means `git merge-tree origin/<base> HEAD` leaves that branch unchanged, so everything in the worktree is already there, squash merges included. Not merged and Uncommitted mean deleting it loses something. Each row also shows the PR for its branch from `gh` (merged, closed, draft, checks failing), fetched in the background scan. Enter opens its actions: open it in WebStorm (Android Studio for Android repos), open a terminal there (Ghostty, else Terminal), run `npm run dev` in a new terminal window, stop servers running from that folder, clear `node_modules`, `.next`, `dist`, `build` and similar folders (only ones git ignores), or delete the worktree. Delete stops the worktree's servers first, keeps the branch and runs `git worktree prune`. Both rename the folder away at once and remove it in the background. Sizes are saved and recounted every 10 minutes. A Recommended section on top lists what is safe to clean, biggest first. "Last used" is the later of when HEAD last moved (commit, checkout, pull) and when an uncommitted file was last edited. The rules: delete a worktree that is in main or uat, or whose PR is merged with no local edits, and unused for 3 days; delete one whose commits are all on a remote and that has been clean and unused for 14 days; otherwise clear its artifacts if it has been unused for 7 days and they take over 200 MB. A worktree with uncommitted or unpushed work is never recommended for delete. Recommended deletes rank above artifact clears, and "Delete all pushed worktrees" opens a review page that lists every worktree it will remove, with one Enter to delete them all.
-- Metal Manager (type `metal`) shows what is using CPU and memory, grouped by app, so Chrome's 20 helpers count as one Google Chrome row. A CPU section lists apps above 1% CPU, the heat makers, and a Memory section lists every app by memory, the same footprint number as Activity Monitor's Memory column. Each row shows memory and its share of RAM, CPU, and power in watts, from the kernel's per-process energy counter. It reads the kernel directly through libproc, about 3 ms for every process. It samples every 2 seconds while open and every 10 seconds in the background, so the numbers are current the moment it opens, and Hop stays under 0.2% CPU. When something is heavy, a Worth quitting section shows first: apps above 40% CPU, apps holding a fifth of your RAM, and, once memory is 85% full, every app above 1 GB. On a calm Mac the section isn't there. If one app stays above 80% CPU for 2 minutes, Hop sends a notification, once per hot spell. Rows keep their place while you look, so the selection doesn't jump. Enter opens an app's actions: Quit (like ⌘Q), Force Quit all its processes, or force quit one process. Each process shows the folder it is running in, so you can tell which `node` belongs to which project. Root processes such as WindowServer and kernel_task are not shown, because a normal user can't read or kill them.
-- Port Manager (type `port`) lists every listening TCP port with the command that opened it and the folder it runs from, read from libproc in about 5 ms. Servers from ~/Desktop/work are grouped by project, Docker ports show their container name from `docker ps`, and servers whose folder was deleted (a removed worktree) get their own section. Enter opens actions: open localhost in the browser, Stop (like Ctrl+C), Force stop, or show the folder. Stop also ends the npm, npx or nodemon processes in the same folder that started the server, so nodemon can't restart it, and it never climbs past your shell, an app or Claude. Docker rows stop the container with `docker stop` instead of touching OrbStack. In the main search, type `:3000` (or the start of a port) to see what is on that port and stop it from there.
-- AirDrop Shelf: start dragging files, folders or photos from Finder, the Desktop or any app and an island springs out of the notch (top center on screens without one) with a spinning drop vortex. Drop on it to shelve them, from as many folders as you like. The island then shrinks to a pill beside the notch with the file count. Hover it to open, then AirDrop sends everything in one go. The shelf keeps the files after a send, so a cancelled or failed AirDrop loses nothing. Type `shelf` in Hop to see the files, remove single ones, clear the shelf, tuck the pill into the notch (the files stay) or bring the island back. Clicks pass through everywhere outside the island. The animations run in Core Animation, off Hop's main thread.
-- Each plugin, and Quit Hop, appears as a command in the app search. Type `clip` and press Enter to open Clipboard History in the same panel. Esc, or Backspace in an empty search field, goes back to the app search.
-- `Tab` switches between the two lists, `↑↓` move the selection, `⌘↑` jumps to the first item of the current group and again to the group above, `⌘↓` jumps to the next group, holding `⌘` shows `⌘1` to `⌘9` beside the visible rows and `⌘` plus a number opens that row, `Enter` opens the app or pastes the entry, `Esc` closes the panel. Type `quit hop` to quit.
+Apps, clipboard history, a calculator, decoders, a dictionary, a video downloader and dev tools, in one 1.4 MB app with zero dependencies.
 
-Build and install with `./build.sh install`, which runs the fuzzy-match check, builds, and copies the app to `~/Applications`.
+![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black?logo=apple)
+![Swift](https://img.shields.io/badge/Swift-AppKit-F05138?logo=swift&logoColor=white)
+![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
+![Binary](https://img.shields.io/badge/binary-1.4%20MB-blue)
+![Search](https://img.shields.io/badge/search-%3C0.3%20ms-orange)
 
-## Plugins
+<img src="docs/download.jpg" width="820" alt="Hop downloading a YouTube video with a thumbnail preview">
 
-Every feature is a plugin in `Sources/Plugins/`. The contract lives in `Sources/Plugin.swift`. A plugin conforms to `Plugin`, and in `register(in:)` it tells the registry what it adds:
+</div>
 
-- `add(search:)` adds results to the main search. Apps and the calculator do this.
-- `add(page:)` adds a page with its own list, an optional hotkey and an optional preview. Clipboard History does this. Every page also shows up as a command in the main search.
-- `add(command:)` adds a named action to the main search, like Quit Hop.
+## 🔥 Why Hop
+
+- ⚡ **Every keystroke answers in under 0.3 ms.** Typing `saf`, `100 usd to inr` or `define hop` takes 0.18 to 0.27 ms on an M4 Pro, measured over 200 runs each.
+- 🪶 **1.4 MB, no dependencies.** It is plain Swift and AppKit, with no Electron and no web views. Only 615 KB of that is machine code.
+- 🧊 **Nothing slow touches the main thread.** git, gh, docker, process sampling, port scans, image decoding and disk writes all run in the background. When idle, Hop sits at 0.0% CPU.
+- 🧩 **Everything is a plugin.** Each feature is one Swift file in `Sources/Plugins/`.
+
+## 🚀 Install
+
+```sh
+git clone https://github.com/kratos-respawned/hop.git
+cd hop
+./build.sh install
+```
+
+You need the Xcode command line tools (`xcode-select --install`). The script runs the fuzzy-match check, builds, signs and copies Hop to `~/Applications`, then starts it. For video downloads, also run `brew install yt-dlp ffmpeg`.
+
+Press `⌥ Space` to open Hop and `⌥ V` for clipboard history.
+
+## ✨ What it does
+
+<table>
+<tr>
+<td width="50%"><img src="docs/calculator.jpg" alt="Currency conversion"></td>
+<td width="50%"><img src="docs/jwt.jpg" alt="JWT decoding"></td>
+</tr>
+<tr>
+<td><b>🧮 Calculator and currency</b><br>Type <code>2^10</code>, <code>150 + 10%</code>, <code>20% off 150</code> or <code>100 usd to inr</code>. Enter copies the answer.</td>
+<td><b>🔐 JWT and Base64 decoder</b><br>Paste a token and see when it expires, with the payload coloured and IST times beside <code>exp</code> and <code>iat</code>.</td>
+</tr>
+<tr>
+<td><img src="docs/epoch.jpg" alt="Epoch decoding"></td>
+<td><img src="docs/dictionary.jpg" alt="Dictionary entry"></td>
+</tr>
+<tr>
+<td><b>🕒 Time decoder</b><br>Paste an epoch (seconds or ms) or an ISO date to get IST, UTC and how long ago. <code>now</code> gives the current epoch.</td>
+<td><b>📖 Dictionary</b><br><code>define serendipity</code> shows the full entry from the Mac's built-in Oxford dictionary, offline.</td>
+</tr>
+</table>
+
+### 🔎 App search
+
+`⌥ Space` searches apps with fuzzy matching on prefixes, word starts and initials (`vsc`, `ws`). Apps you open often rank higher.
+
+### 📋 Clipboard history
+
+`⌥ V` keeps the last 300 text and image entries, with a preview of the selected one. Items that password managers mark as concealed are never saved.
+
+### 🎬 Video downloader
+
+Paste a YouTube, Instagram, X, Reddit, Vimeo, TikTok or similar link. Pick the video, the video with SponsorBlock cutting sponsor reads, the video with sponsors marked as chapters, or audio only. Hop then lists the qualities the video really has, with their sizes, and puts 1080p first.
+
+- Up to 1080p it picks h264, which plays everywhere. Above that YouTube only offers AV1 or VP9, and QuickTime plays AV1 only on M3 or newer Macs.
+- Audio comes as m4a (no re-encode) or mp3.
+- The preview shows the thumbnail, title, channel, length and how much of the video SponsorBlock marks as sponsors. That check sends SponsorBlock only the first 4 characters of a hash of the video ID.
+- Files go to `~/Downloads`. Type `downloads` to watch progress, stop a download or show it in Finder. A notification says when one finishes.
+
+### 📤 AirDrop shelf at the notch
+
+Start dragging files from Finder, the Desktop or any app and an island springs out of the notch. Drop them on it, from as many folders as you like. It shrinks to a pill beside the notch with the file count. Hover it and AirDrop everything in one send. The shelf keeps the files after a send, so a cancelled AirDrop loses nothing. Type `shelf` to remove files, clear the shelf or tuck the pill away.
+
+### 🛠️ Dev tools
+
+<details>
+<summary><b>🔥 Metal Manager</b> (type <code>metal</code>): what is heating your Mac</summary>
+
+<br>
+
+Shows CPU and memory grouped by app, so Chrome's 20 helpers count as one row. The memory number is the same footprint Activity Monitor shows. Each row also shows the share of RAM, CPU and power in watts, read from the kernel through libproc in about 3 ms for every process.
+
+When something is heavy, a Worth quitting section comes first. It lists apps above 40% CPU, apps holding a fifth of your RAM, and every app above 1 GB once memory is 85% full. If one app stays above 80% CPU for 2 minutes, Hop sends a notification. Enter offers Quit, Force Quit, or force quitting a single process. Each process shows its folder, so you can tell which `node` belongs to which project.
+
+</details>
+
+<details>
+<summary><b>🔌 Port Manager</b> (type <code>port</code>, or <code>:3000</code> in the search)</summary>
+
+<br>
+
+Lists every listening TCP port with the command and folder behind it, read in about 5 ms. Docker ports show their container name. Enter opens localhost, stops the server (and the npm or nodemon that would restart it), force stops it, or shows its folder. Docker rows stop the container with `docker stop`.
+
+</details>
+
+<details>
+<summary><b>🌳 Worktree Manager</b> (type <code>worktree</code>)</summary>
+
+<br>
+
+Lists every repo in `~/Desktop/work` with its git worktrees, their size and how much of that is build artifacts. Each worktree gets a merge badge (In main, In uat, Not merged, Uncommitted) and its PR status from `gh`. Enter opens it in WebStorm or a terminal, runs `npm run dev`, clears `node_modules` and other ignored build folders, or deletes the worktree.
+
+A Recommended section lists what is safe to clean, biggest first. A worktree with uncommitted or unpushed work is never recommended for delete.
+
+The folder and the `main` and `uat` branches are fixed for now.
+
+</details>
+
+<details>
+<summary><b>☕ Claude Manager</b> (type <code>claude</code>)</summary>
+
+<br>
+
+Lists running Claude Code sessions with their folder, whether they are working or idle, and their subagents. Enter caffeinates a session, which keeps the Mac awake even with the lid closed, until that session finishes. The first time, it asks for your password once to add `/etc/sudoers.d/hop`. That rule lets your user run only `pmset -a disablesleep 1`, `pmset -a disablesleep 0` and `pmset sleepnow`.
+
+</details>
+
+## ⌨️ Keys
+
+| Key | Does |
+| --- | --- |
+| `⌥ Space` | Open Hop |
+| `⌥ V` | Clipboard history |
+| `↑` `↓` | Move the selection |
+| `⌘ ↑` `⌘ ↓` | Jump to the previous or next group |
+| Hold `⌘` | Show `⌘1` to `⌘9` beside rows, then press a number to open one |
+| `Tab` | Switch page |
+| `Enter` | Open, copy or paste |
+| `Esc` | Go back, or close |
+
+Each plugin also appears as a command in the search. Type `clip` and press Enter to open Clipboard History. Type `quit hop` to quit.
+
+## 🧩 Write a plugin
+
+Every feature is a plugin in `Sources/Plugins/`, and the contract is in `Sources/Plugin.swift`. In `register(in:)` a plugin tells Hop what it adds:
+
+- `add(search:)` adds results to the main search, like the calculator.
+- `add(page:)` adds a page with its own list, an optional hotkey and an optional preview, like Clipboard History.
+- `add(command:)` adds a named action, like Quit Hop.
 
 ```swift
 final class EmojiPlugin: Plugin, SearchProvider {
@@ -33,10 +153,10 @@ final class EmojiPlugin: Plugin, SearchProvider {
 }
 ```
 
-A page whose results change in the background posts `NotificationCenter.default.post(name: .pageChanged, object: self)`, and Hop refreshes it if it's on screen. An item can open a page that isn't registered, like a details page, and Esc goes back.
+Add it to the `PluginManager([...])` list in `Sources/main.swift`. The list's order is the order of results. A page whose results change in the background posts `.pageChanged` and Hop refreshes it.
 
-To turn it on, add it to the `PluginManager([...])` list in `Sources/main.swift`. That list's order is also the order of results in the main search. No other file changes.
+## 🔒 Permissions
 
-Pasting straight into the frontmost app needs Accessibility permission. Without it, Enter only copies the entry. `build.sh` signs Hop with the first Apple Development identity in your keychain, so macOS keeps Accessibility and Desktop folder permissions across rebuilds. Without one it falls back to ad hoc signing, and each rebuild resets those permissions.
-
-Nothing slow runs on the main thread. git, gh, docker, process sampling, port scans, image decoding and disk writes all run on background queues, and pages show cached results and refresh when the work finishes. Searches take 0.1 to 2 ms.
+- **Accessibility** lets Enter paste straight into the frontmost app. Without it, Enter only copies.
+- `build.sh` signs Hop with the first Apple Development identity in your keychain, so macOS keeps its permissions across rebuilds. Without one it signs ad hoc, and each rebuild resets them.
+- Exchange rates come from open.er-api.com, refresh every 6 hours and are cached for offline use. Calculations, decodes, definitions and downloads never go into Recent.
