@@ -158,7 +158,7 @@ final class ProcessActions: Page {
                              action: "Force Quit", section: section, opens: manager, icon: { tile("bolt.fill", .systemRed) },
                              run: { [manager, app] in manager.quit(app, force: true) })
         let processes = app.processes.map { process in
-            Item(title: process.name, subtitle: (["pid \(process.pid)"] + [ProcessTable.workingFolder(process.pid)].compactMap { $0 }).joined(separator: " · "),
+            Item(title: process.name, subtitle: (["pid \(process.pid)"] + [ProcessTable.workingFolder(process.pid)?.replacingOccurrences(of: NSHomeDirectory(), with: "~")].compactMap { $0 }).joined(separator: " · "),
                  badge: "\(bytes(process.memory)) · \(percent(process.cpu)) · \(power(process.watts))", action: "Force Quit", section: "Processes",
                  opens: manager, icon: { tile("gearshape", .systemGray) }, run: { [manager] in manager.forceQuit(process) })
         }
