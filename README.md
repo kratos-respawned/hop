@@ -6,12 +6,12 @@
 
 **A blazingly fast, native macOS launcher. ⚡**
 
-Apps, clipboard history, a calculator, decoders, a dictionary, a video downloader and dev tools, in one 1.4 MB app with zero dependencies.
+Apps, clipboard history, a calculator, decoders, a dictionary, a video downloader and dev tools, in one 0.9 MB app with zero dependencies.
 
 ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black?logo=apple)
 ![Swift](https://img.shields.io/badge/Swift-AppKit-F05138?logo=swift&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
-![Binary](https://img.shields.io/badge/binary-1.4%20MB-blue)
+![Binary](https://img.shields.io/badge/binary-0.9%20MB-blue)
 ![Search](https://img.shields.io/badge/search-%3C0.3%20ms-orange)
 
 <img src="docs/download.jpg" width="820" alt="Hop downloading a YouTube video with a thumbnail preview">
@@ -21,7 +21,7 @@ Apps, clipboard history, a calculator, decoders, a dictionary, a video downloade
 ## 🔥 Why Hop
 
 - ⚡ **Every keystroke answers in under 0.3 ms.** Typing `saf`, `100 usd to inr` or `define hop` takes 0.18 to 0.27 ms on an M4 Pro, measured over 200 runs each.
-- 🪶 **1.4 MB, no dependencies.** It is plain Swift and AppKit, with no Electron and no web views. Only 615 KB of that is machine code.
+- 🪶 **0.9 MB, no dependencies.** It is plain Swift and AppKit, with no Electron and no web views. Release builds are stripped like App Store builds, and the function names go to `build/Hop.dSYM` so crash reports stay readable.
 - 🧊 **Nothing slow touches the main thread.** git, gh, docker, process sampling, port scans, image decoding and disk writes all run in the background. When idle, Hop sits at 0.0% CPU.
 - 🧩 **Everything is a plugin.** Each feature is one Swift file in `Sources/Plugins/`.
 
