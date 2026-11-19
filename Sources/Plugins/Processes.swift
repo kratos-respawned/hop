@@ -81,10 +81,32 @@ enum ProcessTable {
         let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
         guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, size) == size else { return nil }
         let folder = withUnsafeBytes(of: info.pvi_cdir.vip_path) { String(cString: $0.bindMemory(to: CChar.self).baseAddress!) }
-        return folder == "/" ? nil : folder.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+        return folder == "/" ? nil : folder
     }
 
-    private static func identify(_ pid: pid_t) -> (name: String, appPath: String?) {
+    static func parent(of pid: pid_t) -> pid_t? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+        return pid_t(info.pbi_ppid)
+    }
+
+    static func arguments(_ pid: pid_t) -> [String] {
+        var mib = [CTL_KERN, KERN_PROCARGS2, pid]
+        var buffer = [UInt8](repeating: 0, count: 8192)
+        var size = buffer.count
+        guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return [] }
+        let count = Int(buffer.withUnsafeBytes { $0.load(as: Int32.self) })
+        let afterPath = buffer[MemoryLayout<Int32>.size..<size].drop { $0 != 0 }.drop { $0 == 0 }
+        return afterPath.split(separator: 0, omittingEmptySubsequences: false).prefix(count).map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    static func executableName(_ pid: pid_t) -> String {
+        var pathBuffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        return proc_pidpath(pid, &pathBuffer, UInt32(pathBuffer.count)) > 0 ? (String(cString: pathBuffer) as NSString).lastPathComponent : ""
+    }
+
+    static func identify(_ pid: pid_t) -> (name: String, appPath: String?) {
         var pathBuffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
         let path = proc_pidpath(pid, &pathBuffer, UInt32(pathBuffer.count)) > 0 ? String(cString: pathBuffer) : ""
         let appPath = path.range(of: ".app/").map { String(path[..<$0.lowerBound]) + ".app" }
@@ -99,16 +121,7 @@ enum ProcessTable {
 
     // argv[0], not the executable file name: Claude's binary is named after its version (2.1.328).
     private static func commandName(_ pid: pid_t, path: String) -> String {
-        var mib = [CTL_KERN, KERN_PROCARGS2, pid]
-        var arguments = [CChar](repeating: 0, count: 4096)
-        var size = arguments.count
-        var name = path.isEmpty ? kernelName(pid) : (path as NSString).lastPathComponent
-        if sysctl(&mib, 3, &arguments, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size {
-            let afterCount = arguments[MemoryLayout<Int32>.size..<size]
-            let afterPath = afterCount.drop { $0 != 0 }.drop { $0 == 0 }
-            let firstArgument = String(cString: Array(afterPath.prefix { $0 != 0 }) + [0])
-            if !firstArgument.isEmpty { name = (firstArgument as NSString).lastPathComponent }
-        }
-        return name
+        if let first = arguments(pid).first, !first.isEmpty { return (first as NSString).lastPathComponent }
+        return path.isEmpty ? kernelName(pid) : (path as NSString).lastPathComponent
     }
 }

@@ -26,8 +26,7 @@ final class AppsPlugin: Plugin, SearchProvider {
     }
 
     private func item(for app: App) -> Item {
-        let folder = (app.path as NSString).deletingLastPathComponent.replacingOccurrences(of: NSHomeDirectory(), with: "~")
-        return Item(title: app.name, subtitle: folder, badge: "Application", action: "Open Application", section: "Applications",
+        Item(title: app.name, badge: "Application", action: "Open Application", section: "Applications",
                     icon: { NSWorkspace.shared.icon(forFile: app.path) }) { [self] in
             launches[app.path, default: 0] += 1
             UserDefaults.standard.set(launches, forKey: "launches")
