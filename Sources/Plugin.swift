@@ -17,6 +17,7 @@ enum Preview {
     case image(URL)
     case answer(question: String, answer: String)
     case code(String)
+    case rich(NSAttributedString)
 }
 
 struct Command {

@@ -26,7 +26,9 @@ final class MainSearch: Page {
         return recentItems + results(for: query).filter { !recentTitles.contains($0.title) }
     }
 
+    // Answers like a calculation or a definition are one-off lookups, not places to go back to.
     func didSelect(_ item: Item, query: String) {
+        guard item.preview == nil else { return }
         let originalQuery = query.isEmpty ? recents.first { $0.title == item.title }?.query ?? item.title : query
         recents.removeAll { $0.title == item.title }
         recents = Array(([Recent(query: originalQuery, title: item.title)] + recents).prefix(recentLimit))
@@ -38,7 +40,8 @@ final class MainSearch: Page {
     }
 
     private func item(for recent: Recent) -> Item? {
-        guard var item = (commands(matching: recent.query) + results(for: recent.query)).first(where: { $0.title == recent.title }) else { return nil }
+        guard var item = (commands(matching: recent.query) + results(for: recent.query)).first(where: { $0.title == recent.title }),
+              item.preview == nil else { return nil }
         item.section = "Recent"
         return item
     }

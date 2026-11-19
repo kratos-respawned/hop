@@ -63,7 +63,7 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
             return handleShortcut(event) ? nil : event
         }
         NotificationCenter.default.addObserver(forName: .pageChanged, object: nil, queue: .main) { [weak self] note in
-            guard let self, panel.isVisible, note.object as AnyObject? === shown else { return }
+            guard let self, panel.isVisible, note.object == nil || note.object as AnyObject? === shown else { return }
             refresh(selecting: max(table.selectedRow, 0))
         }
     }
@@ -182,6 +182,8 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
             let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
                                                              .foregroundColor: NSColor.labelColor]
             showPreviewText(NSAttributedString(string: String(text.prefix(previewCharacterLimit)), attributes: attributes), inset: NSSize(width: 14, height: 14))
+        case .rich(let text):
+            showPreviewText(text, inset: NSSize(width: 18, height: 16))
         case .code(let text):
             showPreviewText(highlightedCode(String(text.prefix(previewCharacterLimit))), inset: NSSize(width: 16, height: 16))
         case .answer(let expression, let result):
