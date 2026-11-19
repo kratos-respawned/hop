@@ -29,6 +29,23 @@ struct Activity: Codable {
     let unpushedCommits: Int
 }
 
+struct PullRequest: Codable {
+    let number: Int
+    let state: String
+    let isDraft: Bool
+    let checks: String?
+
+    var isMerged: Bool { state == "MERGED" }
+
+    var text: String {
+        switch state {
+        case "MERGED": return "PR #\(number) merged"
+        case "CLOSED": return "PR #\(number) closed"
+        default: return "\(isDraft ? "Draft PR" : "PR") #\(number)\(checks.map { ", checks \($0)" } ?? "")"
+        }
+    }
+}
+
 struct FolderSizes: Codable {
     let total: Int64
     let artifacts: [Artifact]
@@ -59,6 +76,39 @@ enum WorkFolder {
 
     static func fetch(_ repo: String) {
         git(["fetch", "--quiet", "origin"], in: "\(root)/\(repo)")
+    }
+
+    static func pullRequests(of repo: String) -> [String: PullRequest] {
+        guard let gh = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"].first(where: FileManager.default.isExecutableFile) else { return [:] }
+        let fields = "number,headRefName,state,isDraft,statusCheckRollup"
+        let output = run(gh, ["pr", "list", "--state", "all", "--author", "@me", "--limit", "100", "--json", fields], in: "\(root)/\(repo)")
+        guard let found = try? JSONDecoder().decode([GitHubPull].self, from: Data(output.utf8)) else { return [:] }
+        let preference = ["OPEN", "MERGED", "CLOSED"]
+        return Dictionary(found.map { ($0.headRefName, $0) }) { first, second in
+            (preference.firstIndex(of: first.state) ?? 3) <= (preference.firstIndex(of: second.state) ?? 3) ? first : second
+        }.mapValues(\.pullRequest)
+    }
+
+    private struct GitHubPull: Decodable {
+        let number: Int
+        let headRefName: String
+        let state: String
+        let isDraft: Bool
+        let statusCheckRollup: [Check]?
+
+        struct Check: Decodable {
+            let status: String?
+            let conclusion: String?
+            let state: String?
+        }
+
+        var pullRequest: PullRequest {
+            let results = (statusCheckRollup ?? []).map { $0.conclusion ?? $0.state ?? "" }
+            let isRunning = (statusCheckRollup ?? []).contains { ($0.status ?? "COMPLETED") != "COMPLETED" || $0.state == "PENDING" }
+            let checks = results.contains { ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"].contains($0) } ? "failing"
+                : isRunning ? "running" : results.isEmpty ? nil : "passing"
+            return PullRequest(number: number, state: state, isDraft: isDraft, checks: checks)
+        }
     }
 
     static func status(of worktree: Worktree) -> MergeStatus {
@@ -106,10 +156,12 @@ enum WorkFolder {
 
     static func delete(_ worktree: Worktree) -> Bool {
         guard moveToTrash(worktree.folder) else { return false }
-        git(["worktree", "prune"], in: "\(root)/\(worktree.repo)")
-        let project = (worktree.folder as NSString).deletingLastPathComponent
-        let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: project)) ?? []
-        if project != root && leftovers.allSatisfy({ $0 == ".DS_Store" }) { _ = moveToTrash(project) }
+        DispatchQueue.global(qos: .utility).async {
+            git(["worktree", "prune"], in: "\(root)/\(worktree.repo)")
+            let project = (worktree.folder as NSString).deletingLastPathComponent
+            let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: project)) ?? []
+            if project != root && leftovers.allSatisfy({ $0 == ".DS_Store" }) { _ = moveToTrash(project) }
+        }
         return true
     }
 
@@ -129,8 +181,9 @@ enum WorkFolder {
         run("/usr/bin/git", ["-C", folder] + arguments)
     }
 
-    private static func run(_ executable: String, _ arguments: [String]) -> String {
+    private static func run(_ executable: String, _ arguments: [String], in folder: String? = nil) -> String {
         let process = Process()
+        process.currentDirectoryURL = folder.map { URL(fileURLWithPath: $0) }
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.environment = ProcessInfo.processInfo.environment.merging(noPrompts) { $1 }

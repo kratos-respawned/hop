@@ -185,8 +185,14 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
                 .font: NSFont.systemFont(ofSize: 34, weight: .semibold), .foregroundColor: NSColor.labelColor, .paragraphStyle: centered]))
             showPreviewText(text, inset: NSSize(width: 24, height: 135))
         case .image(let url):
-            previewImage.image = thumbnail(of: url, maxPixels: 1000)
+            previewImage.image = nil
             previewImage.isHidden = false
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                let image = thumbnail(of: url, maxPixels: 1000)
+                DispatchQueue.main.async { [self] in
+                    if case .image(let selected)? = self.item(at: table.selectedRow)?.preview, selected == url { previewImage.image = image }
+                }
+            }
         case nil:
             break
         }

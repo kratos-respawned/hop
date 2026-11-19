@@ -1,6 +1,6 @@
 import AppKit
 
-struct ClaudeSession: Decodable {
+struct ClaudeSession: Decodable, Equatable {
     let pid: Int32
     let sessionId: String
     let cwd: String
@@ -50,6 +50,7 @@ final class ClaudePlugin: Plugin, Page {
     let placeholder = "Search Claude sessions"
     let actionName = "Caffeinate"
     private let keepAwake = KeepAwake()
+    private var sessions: [(session: ClaudeSession, subagents: Int)] = []
     private var caffeinated: [Int32: String] = [:] {
         didSet { try? caffeinated.values.joined(separator: "\n").write(to: caffeinatedList, atomically: true, encoding: .utf8) }
     }
@@ -62,19 +63,31 @@ final class ClaudePlugin: Plugin, Page {
     private var finishedWorkCheck: Timer?
 
     func register(in hop: PluginRegistry) {
+        refreshSessions()
         hop.add(page: self)
     }
 
     func search(_ query: String) -> [Item] {
-        ClaudeSessions.running()
-            .filter { query.isEmpty || fuzzyScore(query, $0.title + " " + $0.cwd) != nil }
-            .sorted { ($0.isWorking ? 0 : 1, $0.title) < ($1.isWorking ? 0 : 1, $1.title) }
-            .map(item)
+        refreshSessions()
+        return sessions
+            .filter { query.isEmpty || fuzzyScore(query, $0.session.title + " " + $0.session.cwd) != nil }
+            .sorted { ($0.session.isWorking ? 0 : 1, $0.session.title) < ($1.session.isWorking ? 0 : 1, $1.session.title) }
+            .map { item(for: $0.session, subagents: $0.subagents) }
     }
 
-    private func item(for session: ClaudeSession) -> Item {
+    private func refreshSessions() {
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let found = ClaudeSessions.running().map { (session: $0, subagents: ClaudeSessions.workingSubagents(of: $0)) }
+            DispatchQueue.main.async { [self] in
+                guard !found.elementsEqual(sessions, by: { $0.session == $1.session && $0.subagents == $1.subagents }) else { return }
+                sessions = found
+                NotificationCenter.default.post(name: .pageChanged, object: self)
+            }
+        }
+    }
+
+    private func item(for session: ClaudeSession, subagents: Int) -> Item {
         let isCaffeinated = caffeinated[session.pid] != nil
-        let subagents = ClaudeSessions.workingSubagents(of: session)
         let folder = session.cwd.replacingOccurrences(of: NSHomeDirectory(), with: "~")
         let subagentsText = subagents == 0 ? nil : "\(subagents) subagent\(subagents == 1 ? "" : "s") working"
         let statusIcon = isCaffeinated ? tile("cup.and.saucer.fill", .systemBrown)

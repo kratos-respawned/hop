@@ -44,8 +44,11 @@ enum ProcessTable {
     private static let host = mach_host_self()
     private static var identities: [pid_t: (name: String, appPath: String?)] = [:]
     private static var pids = [pid_t](repeating: 0, count: 8192)
+    private static let lock = NSLock()
 
     static func snapshot() -> [RunningProcess] {
+        lock.lock()
+        defer { lock.unlock() }
         let count = Int(proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size)))
         let processes = pids.prefix(max(count, 0)).compactMap(process)
         let alive = Set(processes.map(\.pid))
