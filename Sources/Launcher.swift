@@ -20,6 +20,7 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
     private var backStack: [Visit] = []
     private var results: [Item] = []
     private var rows: [ListRow] = []
+    private var showsShortcuts = false
 
     private struct Visit {
         let page: Page
@@ -57,6 +58,10 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
         super.init()
         buildPanel()
         drawOnceHidden()
+        NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { [weak self] event in
+            guard let self, event.window === panel else { return event }
+            return handleShortcut(event) ? nil : event
+        }
         NotificationCenter.default.addObserver(forName: .pageChanged, object: nil, queue: .main) { [weak self] note in
             guard let self, panel.isVisible, note.object as AnyObject? === shown else { return }
             refresh(selecting: max(table.selectedRow, 0))
@@ -105,6 +110,7 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
 
     private func hide() {
         backStack = []
+        showsShortcuts = false
         panel.orderOut(nil)
     }
 
@@ -176,6 +182,8 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
             let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
                                                              .foregroundColor: NSColor.labelColor]
             showPreviewText(NSAttributedString(string: String(text.prefix(previewCharacterLimit)), attributes: attributes), inset: NSSize(width: 14, height: 14))
+        case .code(let text):
+            showPreviewText(highlightedCode(String(text.prefix(previewCharacterLimit))), inset: NSSize(width: 16, height: 16))
         case .answer(let expression, let result):
             let centered = NSMutableParagraphStyle()
             centered.alignment = .center
@@ -213,6 +221,42 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
         guard rows.indices.contains(row) else { return }
         table.selectRowIndexes([row], byExtendingSelection: false)
         scrollInstantly(toShow: row)
+        updateShortcuts()
+    }
+
+    private var groupStarts: [Int] { rows.indices.filter { item(at: $0) != nil && item(at: $0 - 1) == nil } }
+
+    private func handleShortcut(_ event: NSEvent) -> Bool {
+        let commandHeld = event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command
+        if event.type == .flagsChanged {
+            showsShortcuts = commandHeld
+            updateShortcuts()
+            return false
+        }
+        guard commandHeld, let number = Int(event.charactersIgnoringModifiers ?? ""), (1...9).contains(number) else { return false }
+        let numbered = shortcutRows()
+        guard numbered.indices.contains(number - 1) else { return true }
+        select(numbered[number - 1])
+        runSelected()
+        return true
+    }
+
+    private func shortcutRows() -> [Int] {
+        let visible = scroll.contentView.documentVisibleRect
+        let range = table.rows(in: visible)
+        return Array((range.lowerBound..<range.upperBound).filter { row in
+            let rect = table.rect(ofRow: row)
+            return item(at: row) != nil && rect.minY >= visible.minY - 1 && rect.maxY <= visible.maxY + 1
+        }.prefix(9))
+    }
+
+    private func updateShortcuts() {
+        let numbered = showsShortcuts ? shortcutRows() : []
+        let range = table.rows(in: scroll.contentView.documentVisibleRect)
+        for row in range.lowerBound..<range.upperBound {
+            let number = numbered.firstIndex(of: row).map { $0 + 1 }
+            (table.view(atColumn: 0, row: row, makeIfNecessary: false) as? Cell)?.showShortcut(number)
+        }
     }
 
     // Not scrollRowToVisible: its animation lags behind a held arrow key.
@@ -245,6 +289,10 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
         switch command {
         case #selector(NSResponder.moveUp(_:)): select(table.selectedRow - 1, direction: -1)
         case #selector(NSResponder.moveDown(_:)): select(table.selectedRow + 1)
+        case #selector(NSResponder.moveToBeginningOfDocument(_:)):
+            select(groupStarts.last { $0 < table.selectedRow } ?? groupStarts.first ?? 0)
+        case #selector(NSResponder.moveToEndOfDocument(_:)):
+            select(groupStarts.first { $0 > table.selectedRow } ?? rows.count - 1, direction: -1)
         case #selector(NSResponder.insertNewline(_:)): runSelected()
         case #selector(NSResponder.cancelOperation(_:)): goBack()
         case #selector(NSResponder.deleteBackward(_:)) where field.stringValue.isEmpty && !backStack.isEmpty: goBack()
