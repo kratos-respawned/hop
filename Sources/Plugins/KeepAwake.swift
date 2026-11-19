@@ -12,8 +12,11 @@ final class KeepAwake {
     }
 
     func start(_ done: @escaping (Bool) -> Void) {
-        if isOn || turnOn() { return done(true) }
-        allowWithoutPassword { [self] allowed in done(allowed && turnOn()) }
+        if isOn { return done(true) }
+        turnOn { [self] started in
+            if started { return done(true) }
+            allowWithoutPassword { [self] allowed in allowed ? turnOn(done) : done(false) }
+        }
     }
 
     func stop() {
@@ -21,12 +24,14 @@ final class KeepAwake {
         try? FileManager.default.removeItem(at: marker)
     }
 
-    private func turnOn() -> Bool {
-        guard shell("sudo -n \(Self.pmset) -a disablesleep 1", waits: true) == 0 else { return false }
-        FileManager.default.createFile(atPath: marker.path, contents: nil)
-        restoreSleepOnceStopped()
-        isOn = true
-        return true
+    private func turnOn(_ done: @escaping (Bool) -> Void) {
+        shell("sudo -n \(Self.pmset) -a disablesleep 1") { [self] status in
+            guard status == 0 else { return done(false) }
+            FileManager.default.createFile(atPath: marker.path, contents: nil)
+            restoreSleepOnceStopped()
+            isOn = true
+            done(true)
+        }
     }
 
     // A separate process, so sleep comes back even if Hop crashes while the lid is closed.
@@ -34,7 +39,7 @@ final class KeepAwake {
         let waitForStop = "while [ -e '\(marker.path)' ] && kill -0 \(getpid()) 2>/dev/null; do sleep 5; done"
         let restoreSleep = "sudo -n \(Self.pmset) -a disablesleep 0"
         let sleepIfLidClosed = "ioreg -r -k AppleClamshellState -d 4 | grep -q '\"AppleClamshellState\" = Yes' && sudo -n \(Self.pmset) sleepnow"
-        shell("\(waitForStop); \(restoreSleep); \(sleepIfLidClosed)", waits: false)
+        shell("\(waitForStop); \(restoreSleep); \(sleepIfLidClosed)")
     }
 
     private func allowWithoutPassword(_ done: @escaping (Bool) -> Void) {
@@ -50,16 +55,13 @@ final class KeepAwake {
         do { try osascript.run() } catch { done(false) }
     }
 
-    @discardableResult
-    private func shell(_ command: String, waits: Bool) -> Int32 {
+    private func shell(_ command: String, finished: ((Int32) -> Void)? = nil) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
         process.arguments = ["-c", command]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return -1 }
-        guard waits else { return 0 }
-        process.waitUntilExit()
-        return process.terminationStatus
+        process.terminationHandler = { ended in DispatchQueue.main.async { finished?(ended.terminationStatus) } }
+        if (try? process.run()) == nil { finished?(-1) }
     }
 }

@@ -39,6 +39,35 @@ enum PortTable {
         return listeners
     }
 
+    private(set) static var latest: [Listener] = []
+    private static let queue = DispatchQueue(label: "ports", qos: .userInitiated)
+
+    static func refresh(then changed: @escaping () -> Void = {}) {
+        queue.async {
+            let found = listeners()
+            DispatchQueue.main.async {
+                let isSame = found.map { "\($0.pid):\($0.port)" } == latest.map { "\($0.pid):\($0.port)" }
+                latest = found
+                if !isSame { changed() }
+            }
+        }
+    }
+
+    static func servers(in folder: String) -> [Listener] {
+        latest.filter { !$0.isDocker && $0.appPath == nil && ($0.folder == folder || $0.folder?.hasPrefix(folder + "/") == true) }
+    }
+
+    static func stopServers(in folder: String) {
+        queue.async {
+            listeners().filter { !$0.isDocker && $0.appPath == nil && ($0.folder == folder || $0.folder?.hasPrefix(folder + "/") == true) }
+                .forEach { stop($0, signal: SIGTERM) }
+        }
+    }
+
+    static func stop(_ listener: Listener, signal: Int32) {
+        (listener.starters.isEmpty ? [listener.pid] : listener.starters).forEach { kill($0, signal) }
+    }
+
     private static func listeningPorts(of pid: pid_t, fds: inout [proc_fdinfo]) -> Set<Int> {
         let bytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, &fds, Int32(fds.count * MemoryLayout<proc_fdinfo>.stride))
         var ports: Set<Int> = []
@@ -126,22 +155,37 @@ final class PortPlugin: Plugin, Page {
     private let otherSection = "Other"
     private let appsSection = "Apps"
 
+    init() {
+        PortTable.refresh()
+    }
+
     func register(in hop: PluginRegistry) {
         hop.add(page: self)
+        hop.add(search: PortLookup(manager: self))
     }
 
     func search(_ query: String) -> [Item] {
-        checkContainers()
         let order = [nextSection, nodeSection, "", dockerSection, deletedFolders, otherSection, appsSection]
-        return PortTable.listeners()
-            .map { listener in
-                var listener = listener
-                listener.container = listener.isDocker ? containers[listener.port] : nil
-                return (listener: listener, section: section(for: listener))
-            }
+        return namedListeners()
+            .map { (listener: $0, section: section(for: $0)) }
             .sorted { (order.firstIndex(of: $0.section) ?? 2, $0.section, $0.listener.port) < (order.firstIndex(of: $1.section) ?? 2, $1.section, $1.listener.port) }
             .map { item(for: $0.listener, section: $0.section) }
             .filter { query.isEmpty || fuzzyScore(query, "\($0.title) \($0.subtitle)") != nil }
+    }
+
+    func items(onPortsStartingWith digits: String) -> [Item] {
+        namedListeners().filter { String($0.port).hasPrefix(digits) }.sorted { $0.port < $1.port }
+            .map { item(for: $0, section: "Ports") }
+    }
+
+    private func namedListeners() -> [Listener] {
+        checkContainers()
+        PortTable.refresh { [weak self] in NotificationCenter.default.post(name: .pageChanged, object: self) }
+        return PortTable.latest.map { listener in
+            var listener = listener
+            listener.container = listener.isDocker ? containers[listener.port] : nil
+            return listener
+        }
     }
 
     private func checkContainers() {
@@ -160,7 +204,7 @@ final class PortPlugin: Plugin, Page {
     func refreshSoon() {
         for delay in [0.5, 2] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                NotificationCenter.default.post(name: .pageChanged, object: self)
+                PortTable.refresh { NotificationCenter.default.post(name: .pageChanged, object: self) }
             }
         }
     }
@@ -233,8 +277,22 @@ final class PortActions: Page {
     }
 
     private func stop(_ signal: Int32, then manager: PortPlugin) {
-        (listener.starters.isEmpty ? [listener.pid] : listener.starters).forEach { kill($0, signal) }
+        PortTable.stop(listener, signal: signal)
         manager.refreshSoon()
+    }
+}
+
+final class PortLookup: SearchProvider {
+    private unowned let manager: PortPlugin
+
+    init(manager: PortPlugin) {
+        self.manager = manager
+    }
+
+    func search(_ query: String) -> [Item] {
+        let digits = query.dropFirst()
+        guard query.hasPrefix(":"), !digits.isEmpty, digits.allSatisfy(\.isNumber) else { return [] }
+        return manager.items(onPortsStartingWith: String(digits))
     }
 }
 

@@ -21,8 +21,10 @@ final class ClipboardPlugin: Plugin, Page {
     let actionName = "Paste"
     let hasPreview = true
     let hotkey: HotKey? = HotKey(key: kVK_ANSI_V, modifiers: optionKey)
-    private var history: [Clip]
+    private var history: [Clip] = []
     private var thumbnails: [String: NSImage] = [:]
+    private var thumbnailsInProgress: Set<String> = []
+    private let disk = DispatchQueue(label: "clipboard-disk", qos: .utility)
     private var lastChange = NSPasteboard.general.changeCount
     private let file: URL
     private let imagesDir: URL
@@ -38,12 +40,18 @@ final class ClipboardPlugin: Plugin, Page {
         imagesDir = dir.appendingPathComponent("images")
         try? FileManager.default.createDirectory(at: imagesDir, withIntermediateDirectories: true)
         file = dir.appendingPathComponent("clipboard.json")
-        let saved = try? Data(contentsOf: file)
-        history = saved.flatMap { try? JSONDecoder().decode([Clip].self, from: $0) }
-            ?? saved.flatMap { try? JSONDecoder().decode([String].self, from: $0) }?.map(Clip.text)
-            ?? []
-        let timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.poll() }
-        timer.tolerance = 0.2
+        disk.async { [self] in
+            let saved = try? Data(contentsOf: file)
+            let loaded = saved.flatMap { try? JSONDecoder().decode([Clip].self, from: $0) }
+                ?? saved.flatMap { try? JSONDecoder().decode([String].self, from: $0) }?.map(Clip.text)
+                ?? []
+            DispatchQueue.main.async { [self] in
+                history = loaded
+                let timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.poll() }
+                timer.tolerance = 0.2
+                for case .image(let file, _, _, _) in history { makeThumbnail(file) }
+            }
+        }
     }
 
     func register(in hop: PluginRegistry) {
@@ -80,8 +88,11 @@ final class ClipboardPlugin: Plugin, Page {
         if !Self.skippedTypes.isDisjoint(with: pasteboard.types ?? []) { return }
         if let text = pasteboard.string(forType: .string) {
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { add(.text(text)) }
-        } else if let data = pasteboard.data(forType: .png) ?? pasteboard.data(forType: .tiff), let image = saveImage(data) {
-            add(image)
+        } else if let data = pasteboard.data(forType: .png) ?? pasteboard.data(forType: .tiff) {
+            disk.async { [self] in
+                guard let image = saveImage(data) else { return }
+                DispatchQueue.main.async { [self] in add(image) }
+            }
         }
     }
 
@@ -98,18 +109,37 @@ final class ClipboardPlugin: Plugin, Page {
     private func add(_ clip: Clip) {
         history.removeAll { $0 == clip }
         history.insert(clip, at: 0)
+        var dropped: [String] = []
         while history.count > limit {
             if case .image(let file, _, _, _) = history.removeLast() {
-                try? FileManager.default.removeItem(at: imagesDir.appendingPathComponent(file))
+                dropped.append(file)
                 thumbnails[file] = nil
             }
         }
-        try? JSONEncoder().encode(history).write(to: file, options: .atomic)
+        let snapshot = history
+        disk.async { [imagesDir, file] in
+            dropped.forEach { try? FileManager.default.removeItem(at: imagesDir.appendingPathComponent($0)) }
+            try? JSONEncoder().encode(snapshot).write(to: file, options: .atomic)
+        }
     }
 
     private func rowIcon(_ file: String) -> NSImage? {
-        if thumbnails[file] == nil { thumbnails[file] = thumbnail(of: imagesDir.appendingPathComponent(file), maxPixels: 64).map(framed) }
-        return thumbnails[file]
+        if let ready = thumbnails[file] { return ready }
+        makeThumbnail(file)
+        return tile("photo", .systemGray)
+    }
+
+    private func makeThumbnail(_ file: String) {
+        guard thumbnailsInProgress.insert(file).inserted else { return }
+        let url = imagesDir.appendingPathComponent(file)
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let image = thumbnail(of: url, maxPixels: 64).map(framed)
+            DispatchQueue.main.async { [self] in
+                thumbnails[file] = image
+                thumbnailsInProgress.remove(file)
+                NotificationCenter.default.post(name: .pageChanged, object: self)
+            }
+        }
     }
 
     private func paste(_ clip: Clip) {

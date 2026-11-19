@@ -1,4 +1,5 @@
 import AppKit
+import UserNotifications
 
 final class MetalPlugin: Plugin, Page {
     let name = "Metal Manager"
@@ -14,8 +15,15 @@ final class MetalPlugin: Plugin, Page {
     private let memoryNearlyFull = 0.85
     private let worthQuittingWhenNearlyFull: UInt64 = 1_000_000_000
     private let worthQuittingLimit = 5
+    private let alertCPU = 80.0
+    private let alertAfter: TimeInterval = 120
+    private var hotSince: [String: Date] = [:]
+    private var alerted: Set<String> = []
     private var apps: [RunningApp] = []
     private var memoryUsed: UInt64 = 0
+    private var impacts: [String: String] = [:]
+    private var memoryTexts: [String: String] = [:]
+    private let sampler = DispatchQueue(label: "metal-sampler", qos: .utility)
     private var previousTotals: [pid_t: (cpuTime: UInt64, energy: UInt64)] = [:]
     private var previousSampleAt: UInt64 = 0
     private var worthQuittingOrder: [String] = []
@@ -24,6 +32,7 @@ final class MetalPlugin: Plugin, Page {
     private var lastSearch = (query: "", at: Date.distantPast)
     private var isReturningFromActions = false
     private var appIcons: [String: NSImage] = [:]
+    private var iconsLoaded: Set<String> = []
 
     init() {
         sample()
@@ -37,11 +46,18 @@ final class MetalPlugin: Plugin, Page {
     private var isOnScreen: Bool { Date().timeIntervalSince(lastSearch.at) < sampleEvery * 2 }
 
     private func sampleIfDue() {
-        let sinceLastSample = Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - previousSampleAt) / 1e9
-        if isOnScreen || sinceLastSample >= sampleWhileHidden { sample() }
+        let isOnScreen = isOnScreen
+        sampler.async { [self] in
+            let sinceLastSample = Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - previousSampleAt) / 1e9
+            if isOnScreen || sinceLastSample >= sampleWhileHidden { takeSample() }
+        }
     }
 
     func sample() {
+        sampler.async { [self] in takeSample() }
+    }
+
+    private func takeSample() {
         let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let elapsed = Double(now - previousSampleAt)
         let processes = ProcessTable.snapshot().map { process in
@@ -53,9 +69,21 @@ final class MetalPlugin: Plugin, Page {
         }
         previousTotals = Dictionary(processes.map { ($0.pid, ($0.cpuTime, $0.energy)) }) { first, _ in first }
         previousSampleAt = now
-        apps = Dictionary(grouping: processes, by: \.group).values.map(RunningApp.init)
-        memoryUsed = ProcessTable.memoryUsed()
-        NotificationCenter.default.post(name: .pageChanged, object: self)
+        let grouped = Dictionary(grouping: processes, by: \.group).values.map(RunningApp.init)
+        let used = ProcessTable.memoryUsed()
+        let newImpacts = Dictionary(grouped.map { ($0.key, impact(of: $0)) }) { first, _ in first }
+        let newMemoryTexts = Dictionary(grouped.map { ($0.key, bytes($0.memory)) }) { first, _ in first }
+        let newIcons = Dictionary(grouped.compactMap(\.appPath).filter { iconsLoaded.insert($0).inserted }
+            .map { ($0, NSWorkspace.shared.icon(forFile: $0)) }) { first, _ in first }
+        DispatchQueue.main.async { [self] in
+            apps = grouped
+            memoryUsed = used
+            impacts = newImpacts
+            memoryTexts = newMemoryTexts
+            appIcons.merge(newIcons) { _, new in new }
+            alertAboutHeat()
+            NotificationCenter.default.post(name: .pageChanged, object: self)
+        }
     }
 
     func search(_ query: String) -> [Item] {
@@ -73,23 +101,47 @@ final class MetalPlugin: Plugin, Page {
         let listed = Set(memoryOrder)
         memoryOrder += matching.filter { !listed.contains($0.key) }.map(\.key)
         let byKey = Dictionary(matching.map { ($0.key, $0) }) { first, _ in first }
-        let memorySection = "Memory · \(bytes(memoryUsed)) of \(bytes(ProcessInfo.processInfo.physicalMemory)) used"
+        let memorySection = "Memory · \(bytes(memoryUsed)) of \(bytes(ram)) used"
         let worthQuitting = worthQuittingOrder.compactMap { byKey[$0] }.map { app in
             var item = item(for: app, badge: app.cpu >= heatingCPU ? percent(app.cpu) + " CPU" : bytes(app.memory), section: "Worth quitting")
             item.subtitle = whyWorthQuitting(app) ?? item.subtitle
             return item
         }
         return worthQuitting + cpuOrder.compactMap { byKey[$0] }.map { item(for: $0, badge: percent($0.cpu) + " CPU", section: "CPU") }
-            + memoryOrder.compactMap { byKey[$0] }.map { item(for: $0, badge: bytes($0.memory), section: memorySection) }
+            + memoryOrder.compactMap { byKey[$0] }.map { item(for: $0, badge: memoryTexts[$0.key] ?? "", section: memorySection) }
     }
 
     func didSelect(_ item: Item, query: String) {
         isReturningFromActions = true
     }
 
+    private func alertAboutHeat() {
+        let hot = apps.filter { $0.cpu >= alertCPU && $0.appPath != Bundle.main.bundlePath }
+        let hotKeys = Set(hot.map(\.key))
+        hotSince = hotSince.filter { hotKeys.contains($0.key) }
+        alerted.formIntersection(hotKeys)
+        for app in hot where !alerted.contains(app.key) {
+            let since = hotSince[app.key] ?? Date()
+            hotSince[app.key] = since
+            guard Date().timeIntervalSince(since) >= alertAfter else { continue }
+            alerted.insert(app.key)
+            notify(app)
+        }
+    }
+
+    private func notify(_ app: RunningApp) {
+        let content = UNMutableNotificationContent()
+        content.title = "\(app.name) is heating your Mac"
+        content.body = "\(percent(app.cpu)) CPU for over 2 minutes. Type metal in Hop to quit it."
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }
+            center.add(UNNotificationRequest(identifier: app.key, content: content, trigger: nil))
+        }
+    }
+
     private func whyWorthQuitting(_ app: RunningApp) -> String? {
         guard app.appPath != Bundle.main.bundlePath else { return nil }
-        let ram = ProcessInfo.processInfo.physicalMemory
         let memoryFull = Double(memoryUsed) / Double(ram)
         if app.cpu >= heatingCPU { return "Using \(percent(app.cpu)) CPU, this is what heats the Mac" }
         if Double(app.memory) >= Double(ram) * heavyShareOfRAM { return "Holding \(bytes(app.memory)) of \(bytes(ram)) RAM" }
@@ -103,16 +155,12 @@ final class MetalPlugin: Plugin, Page {
         let count = app.processes.count
         let processText = count == 1 ? "pid \(app.processes[0].pid)" : "\(count) processes"
         let appIcon = icon(for: app)
-        return Item(title: app.name, subtitle: "\(processText) · \(impact(of: app))",
+        return Item(title: app.name, subtitle: "\(processText) · \(impacts[app.key] ?? "")",
                     badge: badge, section: section, opens: ProcessActions(app: app, manager: self), icon: { appIcon })
     }
 
     private func icon(for app: RunningApp) -> NSImage {
-        guard let appPath = app.appPath else { return tile("terminal", .systemGray) }
-        if let cached = appIcons[appPath] { return cached }
-        let appIcon = NSWorkspace.shared.icon(forFile: appPath)
-        appIcons[appPath] = appIcon
-        return appIcon
+        app.appPath.flatMap { appIcons[$0] } ?? tile(app.appPath == nil ? "terminal" : "app", .systemGray)
     }
 
     func quit(_ app: RunningApp, force: Bool) {
@@ -131,7 +179,7 @@ final class MetalPlugin: Plugin, Page {
     }
 
     private func sampleSoon() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.sample() }
+        sampler.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.takeSample() }
     }
 }
 
@@ -166,12 +214,14 @@ final class ProcessActions: Page {
     }
 }
 
+private let ram = ProcessInfo.processInfo.physicalMemory
+
 private func bytes(_ count: UInt64) -> String {
     ByteCountFormatter.string(fromByteCount: Int64(count), countStyle: .memory)
 }
 
 private func impact(of app: RunningApp) -> String {
-    let shareOfMemory = Double(app.memory) / Double(ProcessInfo.processInfo.physicalMemory) * 100
+    let shareOfMemory = Double(app.memory) / Double(ram) * 100
     return "\(bytes(app.memory)) (\(percent(shareOfMemory)) of RAM) · \(percent(app.cpu)) CPU · \(power(app.watts))"
 }
 

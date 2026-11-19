@@ -10,15 +10,24 @@ final class AppsPlugin: Plugin, SearchProvider {
     private var scannedAt = Date.distantPast
     private var launches = UserDefaults.standard.dictionary(forKey: "launches") as? [String: Int] ?? [:]
 
+    init() {
+        rescan()
+    }
+
+    private func rescan() {
+        scannedAt = Date()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let found = Self.scan()
+            DispatchQueue.main.async { [self] in apps = found }
+        }
+    }
+
     func register(in hop: PluginRegistry) {
         hop.add(search: self)
     }
 
     func search(_ query: String) -> [Item] {
-        if Date().timeIntervalSince(scannedAt) > 10 {
-            apps = Self.scan()
-            scannedAt = Date()
-        }
+        if Date().timeIntervalSince(scannedAt) > 10 { rescan() }
         let ranked = apps
             .compactMap { app in fuzzyScore(query, app.name).map { (app, $0 + min(launches[app.path] ?? 0, 30) * 10) } }
             .sorted { $0.1 != $1.1 ? $0.1 > $1.1 : $0.0.name < $1.0.name }

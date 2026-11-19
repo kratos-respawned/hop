@@ -14,8 +14,12 @@ final class WorktreePlugin: Plugin, Page {
         .appendingPathComponent("Hop/worktrees.json")
     private var lastScan = Date.distantPast
     private var isScanning = false
+    private let disk = DispatchQueue(label: "worktrees-disk", qos: .utility)
     private var saved = Saved() {
-        didSet { try? JSONEncoder().encode(saved).write(to: savedFile) }
+        didSet {
+            let snapshot = saved
+            disk.async { [savedFile] in try? JSONEncoder().encode(snapshot).write(to: savedFile, options: .atomic) }
+        }
     }
 
     private struct Saved: Codable {
@@ -23,6 +27,7 @@ final class WorktreePlugin: Plugin, Page {
         var sizes: [String: FolderSizes] = [:]
         var statuses: [String: MergeStatus] = [:]
         var activity: [String: Activity] = [:]
+        var pullRequests: [String: PullRequest] = [:]
     }
 
     private struct Recommendation {
@@ -32,8 +37,10 @@ final class WorktreePlugin: Plugin, Page {
     }
 
     init() {
-        if let data = try? Data(contentsOf: savedFile), let previous = try? JSONDecoder().decode(Saved.self, from: data) {
-            saved = previous
+        Tools.warmUp()
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            guard let data = try? Data(contentsOf: savedFile), let previous = try? JSONDecoder().decode(Saved.self, from: data) else { return }
+            DispatchQueue.main.async { [self] in if saved.worktrees.isEmpty { saved = previous } }
         }
     }
 
@@ -57,7 +64,8 @@ final class WorktreePlugin: Plugin, Page {
         let sizeText = sizes.map { "\(bytes($0.total))\(artifactsSize > 0 ? ", \(bytes(artifactsSize)) artifacts" : "")" } ?? "Counting size"
         let statusIcon = worktree.isMainCheckout ? tile("house.fill", .systemBlue) : icon(for: status)
         let usedText = saved.activity[worktree.folder].map { " · \(lastUsedText(idleDays($0)))" } ?? ""
-        return Item(title: worktree.name, subtitle: "\(worktree.branch) · \(sizeText)\(usedText)",
+        let pullRequestText = saved.pullRequests[worktree.folder].map { " · \($0.text)" } ?? ""
+        return Item(title: worktree.name, subtitle: "\(worktree.branch)\(pullRequestText) · \(sizeText)\(usedText)",
                     badge: worktree.isMainCheckout ? "Main checkout" : status?.rawValue ?? "Checking",
                     section: section, opens: WorktreeActions(worktree: worktree, sizes: sizes, status: status, manager: self),
                     icon: { statusIcon })
@@ -102,6 +110,10 @@ final class WorktreePlugin: Plugin, Page {
         if (status == .inMain || status == .inUAT) && idle >= deleteMergedAfterDays {
             return Recommendation(advice: "Delete, \(status.rawValue.lowercased()) and unused for \(idle) days", frees: sizes.total, deletes: true)
         }
+        let hasLocalEdits = [.uncommitted, .uncommittedInMain, .uncommittedInUAT].contains(status)
+        if let pullRequest = saved.pullRequests[worktree.folder], pullRequest.isMerged, !hasLocalEdits, idle >= deleteMergedAfterDays {
+            return Recommendation(advice: "Delete, PR #\(pullRequest.number) merged and unused for \(idle) days", frees: sizes.total, deletes: true)
+        }
         if status == .notMerged && activity.unpushedCommits == 0 && idle >= deletePushedAfterDays {
             return Recommendation(advice: "Delete, everything pushed and unused for \(idle) days", frees: sizes.total, deletes: true)
         }
@@ -140,11 +152,13 @@ final class WorktreePlugin: Plugin, Page {
     }
 
     func delete(_ worktree: Worktree) {
+        PortTable.stopServers(in: worktree.folder)
         guard WorkFolder.delete(worktree) else { return }
         saved.worktrees.removeAll { $0.folder == worktree.folder }
         saved.sizes[worktree.folder] = nil
         saved.statuses[worktree.folder] = nil
         saved.activity[worktree.folder] = nil
+        saved.pullRequests[worktree.folder] = nil
     }
 
     private func scanIfStale() {
@@ -158,6 +172,14 @@ final class WorktreePlugin: Plugin, Page {
             for repo in Set(found.map(\.repo)) {
                 work.addOperation { [self] in
                     WorkFolder.fetch(repo)
+                    work.addOperation { [self] in
+                        let pullRequests = WorkFolder.pullRequests(of: repo)
+                        onMain { [self] in
+                            for worktree in found where worktree.repo == repo && !worktree.isMainCheckout {
+                                saved.pullRequests[worktree.folder] = pullRequests[worktree.branch]
+                            }
+                        }
+                    }
                     for worktree in found where worktree.repo == repo && !worktree.isMainCheckout {
                         work.addOperation { [self] in
                             let status = WorkFolder.status(of: worktree)
@@ -182,6 +204,7 @@ final class WorktreePlugin: Plugin, Page {
                 saved.sizes = saved.sizes.filter { current.contains($0.key) }
                 saved.statuses = saved.statuses.filter { current.contains($0.key) }
                 saved.activity = saved.activity.filter { current.contains($0.key) }
+                saved.pullRequests = saved.pullRequests.filter { current.contains($0.key) }
                 lastScan = Date()
                 isScanning = false
             }
@@ -215,8 +238,46 @@ final class WorktreeActions: Page {
     }
 
     func search(_ query: String) -> [Item] {
-        let actions = artifactItems() + (worktree.isMainCheckout ? [] : [deleteItem()])
+        let servers = PortTable.servers(in: worktree.folder)
+        PortTable.refresh { [self] in NotificationCenter.default.post(name: .pageChanged, object: self) }
+        let actions = startItems() + serverItems(servers) + artifactItems() + (worktree.isMainCheckout ? [] : [deleteItem(stopping: servers)])
         return actions.filter { query.isEmpty || fuzzyScore(query, $0.title) != nil }
+    }
+
+    private func startItems() -> [Item] {
+        let folder = URL(fileURLWithPath: worktree.folder)
+        let section = "\(worktree.name) · \(worktree.branch)"
+        let isWebProject = FileManager.default.fileExists(atPath: worktree.folder + "/package.json")
+        let editor = isWebProject ? Tools.webEditor : Tools.androidEditor
+        let terminal = Tools.terminal
+        var items: [Item] = []
+        if let editor {
+            let editorName = editor.deletingPathExtension().lastPathComponent
+            items.append(Item(title: "Open in \(editorName)", action: "Open", section: section, icon: { NSWorkspace.shared.icon(forFile: editor.path) },
+                              run: { NSWorkspace.shared.open([folder], withApplicationAt: editor, configuration: NSWorkspace.OpenConfiguration()) }))
+        }
+        guard let terminal else { return items }
+        items.append(Item(title: "Open terminal here", action: "Open", section: section, icon: { NSWorkspace.shared.icon(forFile: terminal.path) },
+                          run: { NSWorkspace.shared.open([folder], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration()) }))
+        if hasDevScript {
+            items.append(Item(title: "Run npm run dev", subtitle: "In a new terminal window, Ctrl+C leaves you in this folder", action: "Run",
+                              section: section, icon: { tile("play.fill", .systemGreen) },
+                              run: { [worktree] in runInTerminal("npm run dev", in: worktree, with: terminal) }))
+        }
+        return items
+    }
+
+    // shortcut: a text search, not a JSON parse; a "dev" key outside scripts also matches, parse properly if that misfires.
+    private var hasDevScript: Bool {
+        (FileManager.default.contents(atPath: worktree.folder + "/package.json")).map { String(decoding: $0, as: UTF8.self).contains("\"dev\":") } ?? false
+    }
+
+    private func serverItems(_ servers: [Listener]) -> [Item] {
+        servers.map { server in
+            Item(title: "Stop \(server.command)", subtitle: "Port \(server.port) · pid \(server.pid)", action: "Stop",
+                 section: "\(worktree.name) · Running servers", opens: manager, icon: { tile("stop.fill", .systemOrange) },
+                 run: { PortTable.stop(server, signal: SIGTERM) })
+        }
     }
 
     private func artifactItems() -> [Item] {
@@ -233,7 +294,7 @@ final class WorktreeActions: Page {
         }
     }
 
-    private func deleteItem() -> Item {
+    private func deleteItem(stopping servers: [Listener]) -> Item {
         let warning = switch status {
         case .inMain: "Everything here is in origin/main. The branch stays."
         case .inUAT: "Everything here is in origin/uat. The branch stays."
@@ -243,7 +304,8 @@ final class WorktreeActions: Page {
         case .uncommittedInUAT: "Commits are in origin/uat, but local edits that were never committed will be lost."
         case nil: "Merge status is still being checked."
         }
-        return Item(title: "Delete worktree", subtitle: warning, badge: sizes.map { bytes($0.total) } ?? "",
+        let stopsText = servers.isEmpty ? "" : " Stops \(servers.count) running server\(servers.count == 1 ? "" : "s") first."
+        return Item(title: "Delete worktree", subtitle: warning + stopsText, badge: sizes.map { bytes($0.total) } ?? "",
                     action: "Delete", section: "\(worktree.name) · Delete", opens: manager,
                     icon: { tile("trash.fill", .systemRed) }, run: { [manager, worktree] in manager.delete(worktree) })
     }
@@ -268,6 +330,28 @@ final class ReviewPage: Page {
     func search(_ query: String) -> [Item] {
         items.filter { query.isEmpty || fuzzyScore(query, $0.title) != nil }
     }
+}
+
+enum Tools {
+    static let webEditor = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.jetbrains.WebStorm")
+    static let androidEditor = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.android.studio")
+    static let terminal = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.mitchellh.ghostty")
+        ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal")
+
+    static func warmUp() {
+        DispatchQueue.global(qos: .utility).async { _ = (webEditor, androidEditor, terminal) }
+    }
+}
+
+// The script file lets the terminal run the command and then keep a shell open in the worktree.
+private func runInTerminal(_ command: String, in worktree: Worktree, with terminal: URL) {
+    let scripts = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Hop/run")
+    try? FileManager.default.createDirectory(at: scripts, withIntermediateDirectories: true)
+    let script = scripts.appendingPathComponent(worktree.folder.replacingOccurrences(of: "/", with: "_"))
+    let folder = "'" + worktree.folder.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    try? "#!/bin/zsh -il\ncd \(folder) && \(command)\nexec zsh -il\n".write(to: script, atomically: true, encoding: .utf8)
+    try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+    NSWorkspace.shared.open([script], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration())
 }
 
 private func bytes(_ count: Int64) -> String {
