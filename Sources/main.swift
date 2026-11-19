@@ -3,7 +3,7 @@ import Carbon
 import ServiceManagement
 
 let app = NSApplication.shared
-let plugins = PluginManager([HopPlugin(), CalculatorPlugin(), AppsPlugin(), ClipboardPlugin()])
+let plugins = PluginManager([HopPlugin(), CalculatorPlugin(), AppsPlugin(), ClipboardPlugin(), ClaudePlugin(), WorktreePlugin(), MetalPlugin()])
 let mainSearch = MainSearch(plugins: plugins)
 let launcher = Launcher(pages: [mainSearch] + plugins.pages)
 

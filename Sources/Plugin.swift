@@ -9,7 +9,7 @@ struct Item {
     var section: String?
     var opens: Page?
     let icon: () -> NSImage?
-    var run: () -> Void = {}
+    var run: (() -> Void)?
 }
 
 enum Preview {
@@ -35,11 +35,17 @@ protocol Page: SearchProvider {
     var actionName: String { get }
     var hasPreview: Bool { get }
     var hotkey: HotKey? { get }
+    func didSelect(_ item: Item, query: String)
 }
 
 extension Page {
     var hasPreview: Bool { false }
     var hotkey: HotKey? { nil }
+    func didSelect(_ item: Item, query: String) {}
+}
+
+extension Notification.Name {
+    static let pageChanged = Notification.Name("HopPageChanged")
 }
 
 protocol Plugin {

@@ -16,9 +16,21 @@ final class Panel: NSPanel {
 
 final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
     private let pages: [Page]
-    private var current = 0
-    private var openedFromSearch = false
+    private var shown: Page
+    private var backStack: [Visit] = []
     private var results: [Item] = []
+    private var rows: [ListRow] = []
+
+    private struct Visit {
+        let page: Page
+        let query: String
+        let row: Int
+    }
+
+    private enum ListRow {
+        case header(String)
+        case item(Item)
+    }
     private let width: CGFloat = 750, height: CGFloat = 485
     private let searchHeight: CGFloat = 56, headerHeight: CGFloat = 30, footerHeight: CGFloat = 40
     private let panel: Panel
@@ -39,51 +51,108 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
 
     init(pages: [Page]) {
         self.pages = pages
+        shown = pages[0]
         panel = Panel(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
                       styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         super.init()
         buildPanel()
+        drawOnceHidden()
+        NotificationCenter.default.addObserver(forName: .pageChanged, object: nil, queue: .main) { [weak self] note in
+            guard let self, panel.isVisible, note.object as AnyObject? === shown else { return }
+            refresh(selecting: max(table.selectedRow, 0))
+        }
     }
 
     func toggle(_ page: Page) {
-        guard let index = pages.firstIndex(where: { $0 === page }) else { return }
-        if panel.isVisible && current == index { return hide() }
-        current = index
-        field.stringValue = ""
+        if panel.isVisible && shown === page { return hide() }
+        backStack = []
+        show(page)
+    }
+
+    private var nextPage: Page {
+        let index = pages.firstIndex { $0 === shown } ?? -1
+        return pages[(index + 1) % pages.count]
+    }
+
+    private func show(_ page: Page, returningTo visit: Visit? = nil) {
+        shown = page
+        field.stringValue = visit?.query ?? ""
         field.placeholderString = page.placeholder
-        switchHint.stringValue = pages[(index + 1) % pages.count].name
-        refresh()
+        switchHint.stringValue = nextPage.name
+        refresh(selecting: visit?.row ?? 0)
         if panel.isVisible { return }
         let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main!
         let frame = screen.visibleFrame
         panel.setFrameOrigin(NSPoint(x: frame.midX - width / 2, y: frame.maxY - frame.height * 0.2 - height))
         panel.alphaValue = 0
+        panel.contentView?.layoutSubtreeIfNeeded()
+        panel.displayIfNeeded()
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(field)
         NSAnimationContext.runAnimationGroup { $0.duration = 0.08; panel.animator().alphaValue = 1 }
     }
 
+    // The first open used to build layers, the blur and the text editor mid fade, which flashed for a frame.
+    private func drawOnceHidden() {
+        refresh()
+        panel.alphaValue = 0
+        panel.orderFrontRegardless()
+        _ = panel.fieldEditor(true, for: field)
+        panel.contentView?.layoutSubtreeIfNeeded()
+        panel.displayIfNeeded()
+        panel.orderOut(nil)
+    }
+
     private func hide() {
-        openedFromSearch = false
+        backStack = []
         panel.orderOut(nil)
     }
 
     private func goBack() {
-        if openedFromSearch { toggle(pages[0]) } else { hide() }
-        openedFromSearch = false
+        guard let previous = backStack.popLast() else { return hide() }
+        show(previous.page, returningTo: previous)
     }
 
-    private func refresh() {
-        let query = field.stringValue.trimmingCharacters(in: .whitespaces)
-        results = pages[current].search(query)
-        header.stringValue = results.first?.section ?? pages[current].name
-        layoutList(withPreview: pages[current].hasPreview || results.first?.preview != nil)
+    private func open(_ page: Page) {
+        guard let index = backStack.firstIndex(where: { $0.page === page }) else {
+            backStack.append(Visit(page: shown, query: field.stringValue, row: table.selectedRow))
+            return show(page)
+        }
+        let previous = backStack[index]
+        backStack.removeSubrange(index...)
+        show(page, returningTo: previous)
+    }
+
+    private func refresh(selecting row: Int = 0) {
+        results = shown.search(query)
+        header.stringValue = results.first?.section ?? shown.name
+        rows = listRows(for: results)
+        layoutList(withPreview: shown.hasPreview || results.first?.preview != nil)
         table.reloadData()
         emptyState.isHidden = !results.isEmpty
         resultCount.stringValue = "\(results.count) result\(results.count == 1 ? "" : "s")"
-        select(0)
+        select(min(row, rows.count - 1))
         showSelection()
     }
+
+    private func listRows(for items: [Item]) -> [ListRow] {
+        var rows: [ListRow] = [], section = items.first?.section
+        for item in items {
+            if let nextSection = item.section, nextSection != section {
+                rows.append(.header(nextSection))
+                section = nextSection
+            }
+            rows.append(.item(item))
+        }
+        return rows
+    }
+
+    private func item(at row: Int) -> Item? {
+        guard rows.indices.contains(row), case .item(let item) = rows[row] else { return nil }
+        return item
+    }
+
+    private var query: String { field.stringValue.trimmingCharacters(in: .whitespaces) }
 
     private func layoutList(withPreview: Bool) {
         let listWidth = withPreview ? listWidthWithPreview : width
@@ -96,9 +165,9 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
 
     private func showSelection() {
         let row = table.selectedRow
-        let item = results.indices.contains(row) ? results[row] : nil
+        let item = item(at: row)
         let action = item?.action ?? ""
-        actionHint.stringValue = action.isEmpty ? pages[current].actionName : action
+        actionHint.stringValue = action.isEmpty ? shown.actionName : action
 
         previewScroll.isHidden = true
         previewImage.isHidden = true
@@ -132,16 +201,19 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
 
     func tableViewSelectionDidChange(_ notification: Notification) { showSelection() }
 
-    private func select(_ row: Int) {
-        guard !results.isEmpty else { return }
-        let row = max(0, min(results.count - 1, row))
+    private func select(_ row: Int, direction: Int = 1) {
+        var row = row
+        while rows.indices.contains(row) && item(at: row) == nil { row += direction }
+        guard rows.indices.contains(row) else { return }
         table.selectRowIndexes([row], byExtendingSelection: false)
         scrollInstantly(toShow: row)
     }
 
     // Not scrollRowToVisible: its animation lags behind a held arrow key.
     private func scrollInstantly(toShow row: Int) {
-        let visible = scroll.contentView, rowRect = table.rect(ofRow: row)
+        let visible = scroll.contentView
+        var rowRect = table.rect(ofRow: row)
+        if row > 0 && item(at: row - 1) == nil { rowRect = rowRect.union(table.rect(ofRow: row - 1)) }
         var top = visible.bounds.minY
         if rowRect.minY < top { top = rowRect.minY }
         if rowRect.maxY > top + visible.bounds.height { top = rowRect.maxY - visible.bounds.height }
@@ -150,27 +222,27 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
     }
 
     @objc private func runSelected() {
-        guard results.indices.contains(table.selectedRow) else { return }
-        let item = results[table.selectedRow]
+        guard let item = item(at: table.selectedRow), item.opens != nil || item.run != nil else { return }
+        shown.didSelect(item, query: query)
         if let page = item.opens {
-            toggle(page)
-            openedFromSearch = true
+            item.run?()
+            open(page)
             return
         }
         hide()
-        item.run()
+        item.run?()
     }
 
     func controlTextDidChange(_ notification: Notification) { refresh() }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy command: Selector) -> Bool {
         switch command {
-        case #selector(NSResponder.moveUp(_:)): select(table.selectedRow - 1)
+        case #selector(NSResponder.moveUp(_:)): select(table.selectedRow - 1, direction: -1)
         case #selector(NSResponder.moveDown(_:)): select(table.selectedRow + 1)
         case #selector(NSResponder.insertNewline(_:)): runSelected()
         case #selector(NSResponder.cancelOperation(_:)): goBack()
-        case #selector(NSResponder.deleteBackward(_:)) where field.stringValue.isEmpty && openedFromSearch: goBack()
-        case #selector(NSResponder.insertTab(_:)): toggle(pages[(current + 1) % pages.count])
+        case #selector(NSResponder.deleteBackward(_:)) where field.stringValue.isEmpty && !backStack.isEmpty: goBack()
+        case #selector(NSResponder.insertTab(_:)): toggle(nextPage)
         default: return false
         }
         return true
@@ -178,14 +250,25 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
 
     func windowDidResignKey(_ notification: Notification) { hide() }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { results.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat { item(at: row) == nil ? 30 : 44 }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { item(at: row) != nil }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { Row() }
 
     func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
-        let cell = tableView.makeView(withIdentifier: Cell.id, owner: nil) as? Cell ?? Cell()
-        cell.show(results[row])
-        return cell
+        switch rows[row] {
+        case .header(let title):
+            let header = tableView.makeView(withIdentifier: SectionHeader.id, owner: nil) as? SectionHeader ?? SectionHeader()
+            header.show(title)
+            return header
+        case .item(let item):
+            let cell = tableView.makeView(withIdentifier: Cell.id, owner: nil) as? Cell ?? Cell()
+            cell.show(item)
+            return cell
+        }
     }
 
     private func buildPanel() {
