@@ -56,6 +56,11 @@ final class ClipboardPlugin: Plugin, Page {
 
     func register(in hop: PluginRegistry) {
         hop.add(page: self)
+        NotificationCenter.default.addObserver(forName: .forgetClip, object: nil, queue: .main) { [weak self] note in
+            guard let self, let text = note.object as? String else { return }
+            history.removeAll { $0 == .text(text) }
+            save()
+        }
     }
 
     func search(_ query: String) -> [Item] {
@@ -87,13 +92,18 @@ final class ClipboardPlugin: Plugin, Page {
         lastChange = pasteboard.changeCount
         if !Self.skippedTypes.isDisjoint(with: pasteboard.types ?? []) { return }
         if let text = pasteboard.string(forType: .string) {
-            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { add(.text(text)) }
+            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !(Setting.skipCopiedRequests.isOn && Self.carriesCookies(text)) { add(.text(text)) }
         } else if let data = pasteboard.data(forType: .png) ?? pasteboard.data(forType: .tiff) {
             disk.async { [self] in
                 guard let image = saveImage(data) else { return }
                 DispatchQueue.main.async { [self] in add(image) }
             }
         }
+    }
+
+    // A request copied from DevTools holds login cookies or tokens, and history is saved as plain JSON.
+    private static func carriesCookies(_ text: String) -> Bool {
+        text.range(of: #"(?im)(^|\s)(-b|--cookie) '|^\s*(-H ')?(cookie|authorization):|reddit_session="#, options: .regularExpression) != nil
     }
 
     private func saveImage(_ data: Data) -> Clip? {
@@ -116,6 +126,10 @@ final class ClipboardPlugin: Plugin, Page {
                 thumbnails[file] = nil
             }
         }
+        save(dropping: dropped)
+    }
+
+    private func save(dropping dropped: [String] = []) {
         let snapshot = history
         disk.async { [imagesDir, file] in
             dropped.forEach { try? FileManager.default.removeItem(at: imagesDir.appendingPathComponent($0)) }
@@ -169,4 +183,8 @@ final class ClipboardPlugin: Plugin, Page {
             }
         }
     }
+}
+
+extension Notification.Name {
+    static let forgetClip = Notification.Name("HopForgetClip")
 }
