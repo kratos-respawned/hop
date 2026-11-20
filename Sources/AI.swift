@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import FoundationModels
 
 struct AIError: LocalizedError {
@@ -108,12 +109,17 @@ func sendPaste() {
         }
         return
     }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-        let source = CGEventSource(stateID: .combinedSessionState)
-        for keyDown in [true, false] {
-            let event = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: keyDown)
-            event?.flags = .maskCommand
-            event?.post(tap: .cghidEventTap)
-        }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { pressCommand(CGKeyCode(kVK_ANSI_V)) }
+}
+
+let hopKeyMark: Int64 = 0x484F50
+
+func pressCommand(_ key: CGKeyCode) {
+    let source = CGEventSource(stateID: .combinedSessionState)
+    for keyDown in [true, false] {
+        let event = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: keyDown)
+        event?.flags = .maskCommand
+        event?.setIntegerValueField(.eventSourceUserData, value: hopKeyMark)
+        event?.post(tap: .cghidEventTap)
     }
 }

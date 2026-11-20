@@ -27,16 +27,17 @@ final class WritingPlugin: NSObject, Plugin {
         guard AXIsProcessTrusted() else { return popup.show(message: "Allow Accessibility in Set Up Hop first", near: nil) }
         guard let app = lastApp else { return }
         DispatchQueue.global(qos: .userInitiated).async { [self] in
-            let found = Self.focusedText(in: app.processIdentifier)
+            let found = text == nil ? Self.selection(in: app) : Self.focusedText(in: app.processIdentifier)
             DispatchQueue.main.async { [self] in
                 let selected = text ?? found.text ?? ""
-                guard !selected.isEmpty else { return popup.show(message: "Select some text first, then press ⌥ W", near: found.bounds) }
+                guard !selected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return popup.show(message: "Select some text first, then press ⌥ W", near: found.bounds) }
                 popup.show(WritingPopup.Target(app: app, element: found.element, text: selected), near: found.bounds)
             }
         }
     }
 
     private func watch(_ event: NSEvent) {
+        if event.type == .keyDown, event.cgEvent?.getIntegerValueField(.eventSourceUserData) == hopKeyMark { return }
         guard event.type == .leftMouseUp else {
             if event.type == .leftMouseDown { pressedAt = NSEvent.mouseLocation }
             return button.hide()
@@ -46,7 +47,7 @@ final class WritingPlugin: NSObject, Plugin {
         guard dragged || event.clickCount >= 2, Setting.selectionButton.isOn, AXIsProcessTrusted(),
               let app = NSWorkspace.shared.frontmostApplication, app.processIdentifier != getpid() else { return }
         DispatchQueue.global(qos: .userInitiated).async { [self] in
-            let text = Self.focusedText(in: app.processIdentifier).text ?? ""
+            let text = Self.selection(in: app).text ?? ""
             DispatchQueue.main.async { [self] in
                 guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, hypot(NSEvent.mouseLocation.x - releasedAt.x, NSEvent.mouseLocation.y - releasedAt.y) < 20 else { return }
                 button.show(at: releasedAt) { [self] in open() }
@@ -57,6 +58,30 @@ final class WritingPlugin: NSObject, Plugin {
     @objc func writeWithHop(_ pasteboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
         guard let text = pasteboard.string(forType: .string), !text.isEmpty else { return }
         open(text: text)
+    }
+
+    private static func selection(in app: NSRunningApplication) -> (element: AXUIElement?, text: String?, bounds: CGRect?) {
+        let found = focusedText(in: app.processIdentifier)
+        let blank = found.text.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
+        return found.element == nil || blank ? (nil, copiedSelection(), nil) : found
+    }
+
+    // Chrome draws Google Docs on a canvas and shares nothing through Accessibility, so copy the selection with ⌘C instead.
+    private static func copiedSelection() -> String? {
+        let pasteboard = NSPasteboard.general
+        DispatchQueue.main.sync { ClipboardPlugin.quietUntil = Date() + 1.5 }
+        let saved = clipboardSnapshot()
+        let before = pasteboard.changeCount
+        pressCommand(CGKeyCode(kVK_ANSI_C))
+        var waits = 0
+        while pasteboard.changeCount == before && waits < 25 {
+            Thread.sleep(forTimeInterval: 0.02)
+            waits += 1
+        }
+        guard pasteboard.changeCount != before else { return nil }
+        let text = pasteboard.string(forType: .string)
+        restoreClipboard(saved)
+        return text
     }
 
     private static func focusedText(in pid: pid_t) -> (element: AXUIElement?, text: String?, bounds: CGRect?) {
@@ -306,19 +331,15 @@ final class WritingPopup: NSObject, NSTextFieldDelegate, NSWindowDelegate {
 
     private static func pasteKeepingClipboard(_ text: String) {
         let pasteboard = NSPasteboard.general
-        let saved = (pasteboard.pasteboardItems ?? []).map { item in
-            let copy = NSPasteboardItem()
-            for type in item.types { if let data = item.data(forType: type) { copy.setData(data, forType: type) } }
-            return copy
-        }
+        ClipboardPlugin.quietUntil = Date() + 1.5
+        let saved = clipboardSnapshot()
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
         let change = pasteboard.changeCount
         sendPaste()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
             guard pasteboard.changeCount == change, !saved.isEmpty else { return }
-            pasteboard.clearContents()
-            pasteboard.writeObjects(saved)
+            restoreClipboard(saved)
         }
     }
 
@@ -326,6 +347,8 @@ final class WritingPopup: NSObject, NSTextFieldDelegate, NSWindowDelegate {
         let footerArea: CGFloat = 26, top: CGFloat = 44
         var height = top + footerArea
         [field, divider, rows, title, spinner, scroll].forEach { $0.isHidden = true }
+        title.maximumNumberOfLines = 1
+        title.lineBreakMode = .byTruncatingTail
         spinner.stopAnimation(nil)
 
         switch mode {
@@ -360,8 +383,12 @@ final class WritingPopup: NSObject, NSTextFieldDelegate, NSWindowDelegate {
             footer.stringValue = "↵ Replace    ⌘C Copy    esc Close"
         case .message(let text):
             title.isHidden = false
+            title.maximumNumberOfLines = 0
+            title.lineBreakMode = .byWordWrapping
             title.stringValue = text
-            title.frame = NSRect(x: 14, y: height - 32, width: width - 28, height: 18)
+            let textHeight = min(ceil(title.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: width - 28, height: 400)).height ?? 18), 200)
+            height += max(textHeight - 18, 0)
+            title.frame = NSRect(x: 14, y: height - 14 - textHeight, width: width - 28, height: textHeight)
             footer.stringValue = "esc Close"
         }
         footer.frame = NSRect(x: 14, y: 6, width: width - 28, height: 15)
@@ -394,6 +421,19 @@ final class WritingPopup: NSObject, NSTextFieldDelegate, NSWindowDelegate {
         let x = min(max(spot.minX, visible.minX + 8), visible.maxX - width - 8)
         panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
     }
+}
+
+private func clipboardSnapshot() -> [NSPasteboardItem] {
+    (NSPasteboard.general.pasteboardItems ?? []).map { item in
+        let copy = NSPasteboardItem()
+        for type in item.types { if let data = item.data(forType: type) { copy.setData(data, forType: type) } }
+        return copy
+    }
+}
+
+private func restoreClipboard(_ items: [NSPasteboardItem]) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.writeObjects(items)
 }
 
 private final class SelectionButton: NSObject {

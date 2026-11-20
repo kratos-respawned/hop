@@ -26,6 +26,7 @@ final class ClipboardPlugin: Plugin, Page {
     private var thumbnailsInProgress: Set<String> = []
     private let disk = DispatchQueue(label: "clipboard-disk", qos: .utility)
     private var lastChange = NSPasteboard.general.changeCount
+    static var quietUntil = Date.distantPast
     private let file: URL
     private let imagesDir: URL
     private let limit = 300
@@ -90,6 +91,7 @@ final class ClipboardPlugin: Plugin, Page {
         let pasteboard = NSPasteboard.general
         guard pasteboard.changeCount != lastChange else { return }
         lastChange = pasteboard.changeCount
+        if Date() < Self.quietUntil { return }
         if !Self.skippedTypes.isDisjoint(with: pasteboard.types ?? []) { return }
         if let text = pasteboard.string(forType: .string) {
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !(Setting.skipCopiedRequests.isOn && Self.carriesCookies(text)) { add(.text(text)) }
