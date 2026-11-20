@@ -1,9 +1,14 @@
 import AppKit
+import Carbon
 
 final class Panel: NSPanel {
     override var canBecomeKey: Bool { true }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command, event.charactersIgnoringModifiers == "q" {
+            NSApp.terminate(nil)
+            return true
+        }
         let editing: [String: Selector] = ["x": #selector(NSText.cut(_:)), "c": #selector(NSText.copy(_:)),
                                            "v": #selector(NSText.paste(_:)), "a": #selector(NSText.selectAll(_:))]
         if event.modifierFlags.contains(.command), let action = editing[event.charactersIgnoringModifiers ?? ""],
@@ -42,6 +47,10 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
     private let emptyState = label(13, .regular, .tertiaryLabelColor)
     private let resultCount = label(12, .regular, .tertiaryLabelColor)
     private let actionHint = label(12, .medium, .secondaryLabelColor)
+    private let enterPill = Pill("↵")
+    private var switchParts: [NSView] = []
+    private var removeParts: [NSView] = []
+    var keyRecorder: ((NSEvent?) -> Void)?
     private let switchHint = label(12, .medium, .secondaryLabelColor)
     private let listWidthWithPreview: CGFloat = 330
     private let previewCharacterLimit = 20_000
@@ -60,6 +69,10 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
         drawOnceHidden()
         NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { [weak self] event in
             guard let self, event.window === panel else { return event }
+            if event.type == .keyDown, let record = keyRecorder {
+                record(event)
+                return nil
+            }
             return handleShortcut(event) ? nil : event
         }
         NotificationCenter.default.addObserver(forName: .pageChanged, object: nil, queue: .main) { [weak self] note in
@@ -68,22 +81,23 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
         }
     }
 
+    var isShowing: Bool { panel.isVisible }
+
     func toggle(_ page: Page) {
         if panel.isVisible && shown === page { return hide() }
         backStack = []
         show(page)
     }
 
-    private var nextPage: Page {
-        let index = pages.firstIndex { $0 === shown } ?? -1
-        return pages[(index + 1) % pages.count]
-    }
+    private var nextPage: Page { shown === pages[0] ? pages[1 % pages.count] : pages[0] }
 
     private func show(_ page: Page, returningTo visit: Visit? = nil) {
+        if !panel.isVisible || shown !== page { page.willShow() }
         shown = page
         field.stringValue = visit?.query ?? ""
         field.placeholderString = page.placeholder
         switchHint.stringValue = nextPage.name
+        switchParts.forEach { $0.isHidden = page === pages[0] }
         refresh(selecting: visit?.row ?? 0)
         if panel.isVisible { return }
         let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main!
@@ -109,6 +123,9 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
     }
 
     private func hide() {
+        let record = keyRecorder
+        keyRecorder = nil
+        record?(nil)
         backStack = []
         showsShortcuts = false
         panel.orderOut(nil)
@@ -173,8 +190,7 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
     private func showSelection() {
         let row = table.selectedRow
         let item = item(at: row)
-        let action = item?.action ?? ""
-        actionHint.stringValue = action.isEmpty ? shown.actionName : action
+        updateActionHint(for: item)
 
         previewScroll.isHidden = true
         previewImage.isHidden = true
@@ -229,12 +245,31 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
 
     private var groupStarts: [Int] { rows.indices.filter { item(at: $0) != nil && item(at: $0 - 1) == nil } }
 
+    private func updateActionHint(for item: Item?) {
+        let usesCommand = showsShortcuts && item?.commandRun != nil
+        let action = usesCommand ? item?.commandAction ?? "" : item?.action ?? ""
+        actionHint.stringValue = action.isEmpty ? shown.actionName : action
+        enterPill.text.stringValue = usesCommand ? "⌘↵" : "↵"
+        removeParts.forEach { $0.isHidden = !(showsShortcuts && item?.remove != nil) }
+    }
+
     private func handleShortcut(_ event: NSEvent) -> Bool {
         let commandHeld = event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command
         if event.type == .flagsChanged {
             showsShortcuts = commandHeld
             updateShortcuts()
+            updateActionHint(for: item(at: table.selectedRow))
             return false
+        }
+        if commandHeld, event.keyCode == kVK_Delete, let remove = item(at: table.selectedRow)?.remove {
+            remove()
+            refresh(selecting: max(table.selectedRow, 0))
+            return true
+        }
+        if commandHeld, [kVK_Return, kVK_ANSI_KeypadEnter].contains(Int(event.keyCode)), let run = item(at: table.selectedRow)?.commandRun {
+            hide()
+            run()
+            return true
         }
         guard commandHeld, let number = Int(event.charactersIgnoringModifiers ?? ""), (1...9).contains(number) else { return false }
         let numbered = shortcutRows()
@@ -299,7 +334,7 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
         case #selector(NSResponder.insertNewline(_:)): runSelected()
         case #selector(NSResponder.cancelOperation(_:)): goBack()
         case #selector(NSResponder.deleteBackward(_:)) where field.stringValue.isEmpty && !backStack.isEmpty: goBack()
-        case #selector(NSResponder.insertTab(_:)): toggle(nextPage)
+        case #selector(NSResponder.insertTab(_:)): if shown !== pages[0] { toggle(nextPage) }
         default: return false
         }
         return true
@@ -362,6 +397,9 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none
+        field.usesSingleLineMode = true
+        field.cell?.wraps = false
+        field.cell?.isScrollable = true
         field.delegate = self
 
         let listTop = searchTop - 1 - headerHeight
@@ -394,10 +432,16 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
         let footer = Decoration(frame: NSRect(x: 0, y: 0, width: width, height: footerHeight),
                                 fill: NSColor.black.withAlphaComponent(0.18))
         resultCount.frame = NSRect(x: 22, y: 12, width: 200, height: 16)
-        let hints = NSStackView(views: [actionHint, Pill("↵"), divider(), switchHint, Pill("Tab")])
+        switchParts = [divider(), switchHint, Pill("Tab")]
+        removeParts = [divider(), label(12, .medium, .secondaryLabelColor), Pill("⌘⌫")]
+        (removeParts[1] as? NSTextField)?.stringValue = "Remove"
+        removeParts.forEach { $0.isHidden = true }
+        let hints = NSStackView(views: removeParts + [actionHint, enterPill] + switchParts)
         hints.spacing = 6
-        hints.setCustomSpacing(10, after: hints.views[1])
-        hints.setCustomSpacing(10, after: hints.views[2])
+        hints.setCustomSpacing(10, after: removeParts[0])
+        hints.setCustomSpacing(10, after: removeParts[2])
+        hints.setCustomSpacing(10, after: enterPill)
+        hints.setCustomSpacing(10, after: switchParts[0])
         hints.translatesAutoresizingMaskIntoConstraints = false
         footer.addSubview(hints)
         NSLayoutConstraint.activate([

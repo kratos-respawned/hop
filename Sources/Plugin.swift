@@ -8,6 +8,9 @@ struct Item {
     var preview: Preview?
     var section: String?
     var opens: Page?
+    var commandAction = ""
+    var commandRun: (() -> Void)?
+    var remove: (() -> Void)?
     let icon: () -> NSImage?
     var run: (() -> Void)?
 }
@@ -37,12 +40,14 @@ protocol Page: SearchProvider {
     var actionName: String { get }
     var hasPreview: Bool { get }
     var hotkey: HotKey? { get }
+    func willShow()
     func didSelect(_ item: Item, query: String)
 }
 
 extension Page {
     var hasPreview: Bool { false }
     var hotkey: HotKey? { nil }
+    func willShow() {}
     func didSelect(_ item: Item, query: String) {}
 }
 

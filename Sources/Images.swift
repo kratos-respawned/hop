@@ -6,7 +6,8 @@ private let appIconMargin: CGFloat = 2.5
 private let iconBox = NSRect(x: 0, y: 0, width: 26, height: 26).insetBy(dx: appIconMargin, dy: appIconMargin)
 
 func tile(_ symbol: String, _ color: NSColor) -> NSImage {
-    if let cached = tiles[symbol] { return cached }
+    let key = "\(symbol) \(color)"
+    if let cached = tiles[key] { return cached }
     let image = NSImage(size: NSSize(width: 26, height: 26), flipped: false) { _ in
         let shape = NSBezierPath(roundedRect: iconBox, xRadius: 5, yRadius: 5)
         NSGradient(starting: color.blended(withFraction: 0.3, of: .white) ?? color, ending: color)?.draw(in: shape, angle: -90)
@@ -17,7 +18,7 @@ func tile(_ symbol: String, _ color: NSColor) -> NSImage {
         }
         return true
     }
-    tiles[symbol] = image
+    tiles[key] = image
     return image
 }
 

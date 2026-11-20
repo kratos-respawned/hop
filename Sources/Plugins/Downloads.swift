@@ -261,7 +261,7 @@ final class DownloadsPlugin: Plugin, SearchProvider {
         return total < 60 ? "\(total)s" : "\(total / 60)m \(total % 60)s"
     }
 
-    private func start(_ link: String, kind: Kind, quality: Quality) {
+    private func start(_ link: String, kind: Kind, quality: Quality, isRetry: Bool = false) {
         guard let ytDlp else { return }
         let download = Download(url: link, kind: kind, quality: quality.label, title: details[link]?.title.isEmpty == false ? details[link]!.title : link)
         downloads.append(download)
@@ -278,6 +278,11 @@ final class DownloadsPlugin: Plugin, SearchProvider {
             } else { return }
             if Date().timeIntervalSince(lastProgressPost) > 0.4 { lastProgressPost = Date(); changed() }
         }) { [self] _, errors in
+            // YouTube now and then rejects a stream link it just handed out; a fresh run gets a new one.
+            if !isRetry, download.file == nil, download.failure == nil, errors.contains("HTTP Error 403") {
+                downloads.removeAll { $0 === download }
+                return start(link, kind: kind, quality: quality, isRetry: true)
+            }
             if download.file == nil && download.failure == nil {
                 download.failure = errors.split(separator: "\n").last { $0.hasPrefix("ERROR") }.map { String($0.dropFirst(7)) } ?? "yt-dlp stopped"
             }

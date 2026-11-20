@@ -18,7 +18,7 @@ final class ClipboardPlugin: Plugin, Page {
     let name = "Clipboard History"
     let icon = tile("doc.on.clipboard.fill", .systemPurple)
     let placeholder = "Search clipboard history"
-    let actionName = "Paste"
+    let actionName = "Copy"
     let hasPreview = true
     let hotkey: HotKey? = HotKey(key: kVK_ANSI_V, modifiers: optionKey)
     private var history: [Clip] = []
@@ -77,12 +77,12 @@ final class ClipboardPlugin: Plugin, Page {
             let isLink = text.hasPrefix("http") && !text.contains(where: \.isWhitespace)
             return Item(title: text.prefix(300).split(whereSeparator: \.isWhitespace).joined(separator: " "),
                         subtitle: lines > 1 ? "\(lines) lines" : "\(text.count) characters",
-                        badge: isLink ? "Link" : "Text", preview: .text(text),
-                        icon: { isLink ? tile("link", .systemBlue) : tile("text.alignleft", .systemGray) }, run: { [self] in paste(clip) })
+                        badge: isLink ? "Link" : "Text", preview: .text(text), commandAction: "Paste", commandRun: { [self] in paste(clip) }, remove: { [self] in forget(clip) },
+                        icon: { isLink ? tile("link", .systemBlue) : tile("text.alignleft", .systemGray) }, run: { [self] in copy(clip) })
         case .image(let file, let width, let height, let bytes):
             return Item(title: "Image", subtitle: "\(width)×\(height) · \(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))",
-                        badge: "Image", preview: .image(imagesDir.appendingPathComponent(file)),
-                        icon: { [self] in rowIcon(file) }, run: { [self] in paste(clip) })
+                        badge: "Image", preview: .image(imagesDir.appendingPathComponent(file)), commandAction: "Paste", commandRun: { [self] in paste(clip) }, remove: { [self] in forget(clip) },
+                        icon: { [self] in rowIcon(file) }, run: { [self] in copy(clip) })
         }
     }
 
@@ -129,6 +129,13 @@ final class ClipboardPlugin: Plugin, Page {
         save(dropping: dropped)
     }
 
+    private func forget(_ clip: Clip) {
+        history.removeAll { $0 == clip }
+        guard case .image(let file, _, _, _) = clip else { return save() }
+        thumbnails[file] = nil
+        save(dropping: [file])
+    }
+
     private func save(dropping dropped: [String] = []) {
         let snapshot = history
         disk.async { [imagesDir, file] in
@@ -156,32 +163,27 @@ final class ClipboardPlugin: Plugin, Page {
         }
     }
 
-    private func paste(_ clip: Clip) {
+    @discardableResult
+    private func copy(_ clip: Clip) -> Bool {
         let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
         switch clip {
         case .text(let text):
+            pasteboard.clearContents()
             pasteboard.setString(text, forType: .string)
         case .image(let file, _, _, _):
-            guard let png = try? Data(contentsOf: imagesDir.appendingPathComponent(file)) else { return }
+            guard let png = try? Data(contentsOf: imagesDir.appendingPathComponent(file)) else { return false }
+            pasteboard.clearContents()
             pasteboard.setData(png, forType: .png)
             pasteboard.setData(NSImage(data: png)?.tiffRepresentation, forType: .tiff)
         }
-        guard AXIsProcessTrusted() else {
-            if !UserDefaults.standard.bool(forKey: "askedAccessibility") {
-                UserDefaults.standard.set(true, forKey: "askedAccessibility")
-                AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary)
-            }
-            return
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            let source = CGEventSource(stateID: .combinedSessionState)
-            for keyDown in [true, false] {
-                let event = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: keyDown)
-                event?.flags = .maskCommand
-                event?.post(tap: .cghidEventTap)
-            }
-        }
+        lastChange = pasteboard.changeCount
+        add(clip)
+        return true
+    }
+
+    private func paste(_ clip: Clip) {
+        guard copy(clip) else { return }
+        sendPaste()
     }
 }
 

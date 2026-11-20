@@ -103,7 +103,6 @@ final class DigestPlugin: Plugin, Page {
         """#
 
     private var digest: Digest?
-    private var antPath: String? { ["/opt/homebrew/bin/ant", "/usr/local/bin/ant", NSHomeDirectory() + "/go/bin/ant"].first(where: FileManager.default.isExecutableFile) }
     private var progress: String?
     private var problem: String?
     private var askedClaudeAt = Date.distantPast
@@ -125,7 +124,7 @@ final class DigestPlugin: Plugin, Page {
     }
 
     func search(_ query: String) -> [Item] {
-        guard antPath != nil else { return [connectRow()] }
+        guard ClaudeSignIn.antPath != nil else { return [connectRow()] }
         let text = query.trimmingCharacters(in: .whitespaces).lowercased()
         let picks = (digest?.answer.picks ?? []).filter { text.isEmpty || ($0.title + " " + $0.summary).lowercased().contains(text) }
         return (text.isEmpty ? [statusRow()] : []) + Self.sections.flatMap { section, symbol, color in
@@ -168,19 +167,19 @@ final class DigestPlugin: Plugin, Page {
     private func makeIfDue() {
         guard let morning = Calendar.current.date(bySettingHour: Self.morningHour, minute: 0, second: 0, of: Date()) else { return }
         let madeAt = digest?.madeAt ?? .distantPast
-        guard antPath != nil, progress == nil, Date() >= morning, madeAt < morning, askedClaudeAt < morning else { return }
+        guard ClaudeSignIn.antPath != nil, progress == nil, Date() >= morning, madeAt < morning, askedClaudeAt < morning else { return }
         make()
     }
 
     private func make() {
-        guard let ant = antPath else { return }
+        guard let ant = ClaudeSignIn.antPath else { return }
         progress = "Reading Reddit…"
         problem = nil
         changed()
         DispatchQueue.global(qos: .utility).async { [self] in
             let made = Result { () throws -> Digest in
                 guard let cookie = RedditLogin.load() else { throw Failure("Connect Reddit in Wallpapers first") }
-                guard let token = signInToken(ant) else { throw Failure("Not signed in to Claude. Run ant auth login in Terminal") }
+                guard let token = ClaudeSignIn.token(ant) else { throw Failure("Not signed in to Claude. Run ant auth login in Terminal") }
                 let (posts, text) = try collectPosts(cookie: cookie)
                 DispatchQueue.main.async { [self] in
                     askedClaudeAt = Date()
@@ -235,19 +234,6 @@ final class DigestPlugin: Plugin, Page {
         }
         guard !posts.isEmpty else { throw Failure("Reddit had no posts today") }
         return (posts, text)
-    }
-
-    private func signInToken(_ ant: String) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: ant)
-        process.arguments = ["auth", "print-credentials", "--access-token"]
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return nil }
-        let token = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        process.waitUntilExit()
-        return process.terminationStatus == 0 && !token.isEmpty ? token : nil
     }
 
     private func ask(token: String, about posts: String) throws -> Answer {

@@ -35,7 +35,7 @@ cd hop
 
 You need the Xcode command line tools (`xcode-select --install`). The script runs the fuzzy-match check, builds, signs and copies Hop to `~/Applications`, then starts it. For video downloads, also run `brew install yt-dlp ffmpeg`.
 
-Press `⌥ Space` to open Hop and `⌥ V` for clipboard history.
+Press `⌥ Space` to open Hop and `⌥ V` for clipboard history. You can change the `⌥ Space` shortcut in Settings.
 
 ## ✨ What it does
 
@@ -160,3 +160,7 @@ Add it to the `PluginManager([...])` list in `Sources/main.swift`. The list's or
 - **Accessibility** lets Enter paste straight into the frontmost app. Without it, Enter only copies.
 - `build.sh` signs Hop with the first Apple Development identity in your keychain, so macOS keeps its permissions across rebuilds. Without one it signs ad hoc, and each rebuild resets them.
 - Exchange rates come from open.er-api.com, refresh every 6 hours and are cached for offline use. Calculations, decodes, definitions and downloads never go into Recent.
+
+## License
+
+Personal, non-commercial use only. No redistribution, no ports or clones, and no AI-assisted copying. See [LICENSE](LICENSE).
