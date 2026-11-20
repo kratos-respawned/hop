@@ -120,6 +120,7 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
     }
 
     private func open(_ page: Page) {
+        if page === shown { return refresh(selecting: table.selectedRow) }
         guard let index = backStack.firstIndex(where: { $0.page === page }) else {
             backStack.append(Visit(page: shown, query: field.stringValue, row: table.selectedRow))
             return show(page)

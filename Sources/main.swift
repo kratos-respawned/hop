@@ -5,7 +5,7 @@ import ServiceManagement
 let app = NSApplication.shared
 // The first file size shown loads ICU data for ~12 ms; pay it off the main thread.
 DispatchQueue.global(qos: .utility).async { _ = ByteCountFormatter.string(fromByteCount: 1, countStyle: .file) }
-let plugins = PluginManager([HopPlugin(), DecodePlugin(), DictionaryPlugin(), DownloadsPlugin(), CalculatorPlugin(), AppsPlugin(), ClipboardPlugin(), ClaudePlugin(), WorktreePlugin(), MetalPlugin(), PortPlugin(), ShelfPlugin()])
+let plugins = PluginManager([HopPlugin(), SettingsPlugin(), DecodePlugin(), DictionaryPlugin(), DownloadsPlugin(), CalculatorPlugin(), AppsPlugin(), ClipboardPlugin(), ClaudePlugin(), WorktreePlugin(), MetalPlugin(), PortPlugin(), ShelfPlugin(), WallpapersPlugin(), DigestPlugin()])
 let mainSearch = MainSearch(plugins: plugins)
 let launcher = Launcher(pages: [mainSearch] + plugins.pages)
 
