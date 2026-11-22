@@ -17,11 +17,12 @@ final class SharePlugin: Plugin, Page {
 
     func register(in hop: PluginRegistry) {
         hop.add(page: self)
+        SecureLink.followNetwork()
     }
 
     private var link: String {
         guard let server, server.port != 0 else { return "" }
-        return "http://\(address):\(server.port)/\(server.code)/"
+        return server.secure.map { "https://\($0.host):\(server.port)/\(server.code)/" } ?? "http://\(address):\(server.port)/\(server.code)/"
     }
 
     func search(_ query: String) -> [Item] {
@@ -105,7 +106,10 @@ final class SharePlugin: Plugin, Page {
             changed()
         }
         self.server = server
-        server.start()
+        SecureLink.prepare(for: address) { [weak self, weak server] secure in
+            guard let self, let server, self.server === server else { return }
+            server.start(secure: secure)
+        }
         changed()
     }
 
@@ -163,9 +167,11 @@ final class SharePlugin: Plugin, Page {
         }
         preview.append(text([link, "Scan the code with a phone camera, or open the link in any browser on the same Wi-Fi. " + what]))
         preview.append(NSAttributedString(string: "\n"))
-        preview.append(DigestCard.attached(DigestCard.callout(
-            "Don't share on public Wi-Fi. Files travel unencrypted, so anyone on a café, hotel or office network can see them. On public Wi-Fi, connect this Mac to your phone's hotspot first.",
-            symbol: "exclamationmark.triangle.fill", color: .systemOrange)))
+        preview.append(DigestCard.attached(server.secure == nil
+            ? DigestCard.callout(
+                "Don't share on public Wi-Fi. Files travel unencrypted, so anyone on a café, hotel or office network can see them. On public Wi-Fi, connect this Mac to your phone's hotspot first.",
+                symbol: "exclamationmark.triangle.fill", color: .systemOrange)
+            : DigestCard.callout("Files travel encrypted, so nobody else on this network can read or change them.", symbol: "lock.fill", color: .systemGreen)))
         preview.append(NSAttributedString(string: "\n\n", attributes: [.font: NSFont.systemFont(ofSize: 6)]))
         preview.append(text(["Sharing stops by itself after 15 minutes without activity."], titled: false))
         return preview

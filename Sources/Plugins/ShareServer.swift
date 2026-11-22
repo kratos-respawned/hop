@@ -25,15 +25,19 @@ final class ShareServer {
     let root: URL
     let code = String((0..<8).map { _ in "abcdefghjkmnpqrstuvwxyz23456789".randomElement()! })
     private(set) var port: UInt16 = 0
+    private(set) var secure: SecureLink?
     var onReady: () -> Void = {}
     var onTransfer: (Transfer) -> Void = { _ in }
     var onStop: (String) -> Void = { _ in }
     private let queue = DispatchQueue(label: "hop.share")
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: NWConnection] = [:]
+    private var deadlines: [ObjectIdentifier: Date] = [:]
+    private var pendingUploads: [UUID: Int] = [:]
     private var lastActivity = Date()
     private var idleCheck: DispatchSourceTimer?
     private static let idleLimit: TimeInterval = 15 * 60
+    private static let connectionLimit = 32
     private static let preferredPort: NWEndpoint.Port = 4747
 
     private struct Request {
@@ -72,8 +76,10 @@ final class ShareServer {
         self.root = root.resolvingSymlinksInPath()
     }
 
-    func start() {
+    func start(secure: SecureLink?) {
+        self.secure = secure
         queue.async { [self] in
+            removeLeftoverUploads()
             listen(on: Self.preferredPort)
             let timer = DispatchSource.makeTimerSource(queue: queue)
             timer.schedule(deadline: .now() + 60, repeating: 60)
@@ -100,8 +106,16 @@ final class ShareServer {
         if let reason { DispatchQueue.main.async { [self] in onStop(reason) } }
     }
 
+    private func removeLeftoverUploads() {
+        let files = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isRegularFileKey])) ?? []
+        for file in files where file.lastPathComponent.wholeMatch(of: #/\..+\.hop-[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}/#) != nil
+            && (try? file.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true {
+            try? FileManager.default.removeItem(at: file)
+        }
+    }
+
     private func listen(on port: NWEndpoint.Port) {
-        let parameters = NWParameters.tcp
+        let parameters = secure?.parameters ?? .tcp
         parameters.allowLocalEndpointReuse = true
         guard let listener = try? NWListener(using: parameters, on: port) else {
             return port == Self.preferredPort ? listen(on: .any) : end("Couldn't open a port for sharing")
@@ -124,24 +138,38 @@ final class ShareServer {
     }
 
     private func accept(_ connection: NWConnection) {
-        guard case .hostPort(let host, _) = connection.endpoint, Self.isOnLocalNetwork(host) else { return connection.cancel() }
+        guard case .hostPort(let host, _) = connection.endpoint, Self.isOnLocalNetwork(host), connections.count < Self.connectionLimit
+        else { return connection.cancel() }
         let key = ObjectIdentifier(connection)
         connections[key] = connection
+        deadlines[key] = Date() + 10
         connection.stateUpdateHandler = { [weak self, weak connection] state in
             switch state {
             case .failed: connection?.cancel()
-            case .cancelled: self?.connections[key] = nil
+            case .cancelled:
+                self?.connections[key] = nil
+                self?.deadlines[key] = nil
             default: break
             }
         }
         connection.start(queue: queue)
+        dropWhenStalled(connection)
         readHead(of: connection, from: "\(host)", Data())
+    }
+
+    private func dropWhenStalled(_ connection: NWConnection) {
+        queue.asyncAfter(deadline: .now() + 5) { [weak self, weak connection] in
+            guard let self, let connection, connections[ObjectIdentifier(connection)] != nil else { return }
+            if let deadline = deadlines[ObjectIdentifier(connection)], deadline < Date() { return connection.cancel() }
+            dropWhenStalled(connection)
+        }
     }
 
     private func readHead(of connection: NWConnection, from address: String, _ received: Data) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [self] data, _, isComplete, error in
             let received = received + (data ?? Data())
             if let end = received.range(of: Data("\r\n\r\n".utf8)) {
+                deadlines[ObjectIdentifier(connection)] = nil
                 var request = Request(String(decoding: received[..<end.lowerBound], as: UTF8.self))
                 request.device = Self.device(request.headers["user-agent"] ?? "") + " · " + address
                 respond(to: request, body: received[end.upperBound...], on: connection)
@@ -226,11 +254,14 @@ final class ShareServer {
               (try? folder.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
         else { return reply(connection, 404, "Folder not found") }
         let free = (try? folder.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage ?? 0
-        guard Int64(length) + 1_000_000_000 < free else { return reply(connection, 507, "Not enough space on this Mac") }
+        guard Int64(length) < free - 1_000_000_000 - Int64(pendingUploads.values.reduce(0, +)) else { return reply(connection, 507, "Not enough space on this Mac") }
         let name = Self.cleanName(request.query["name"] ?? "")
-        let partial = folder.appendingPathComponent(".\(name).hop-\(UUID().uuidString)")
+        var partial = folder.appendingPathComponent(".\(name).hop-\(UUID().uuidString)")
+        var quarantine = URLResourceValues()
+        quarantine.quarantineProperties = ["LSQuarantineType": "LSQuarantineTypeWebDownload"]
         guard FileManager.default.createFile(atPath: partial.path, contents: nil), let handle = try? FileHandle(forWritingTo: partial)
         else { return reply(connection, 500, "Couldn't save the file") }
+        try? partial.setResourceValues(quarantine)
         var transfer = Transfer(file: folder.appendingPathComponent(name), incoming: true, device: request.device, total: length)
         report(&transfer)
         save(body, Upload(handle: handle, partial: partial, folder: folder, name: name, transfer: transfer), from: connection)
@@ -242,6 +273,8 @@ final class ShareServer {
         do { try upload.handle.write(contentsOf: wanted) } catch { return fail(upload, connection, 500, "Couldn't save the file") }
         upload.transfer.done += wanted.count
         lastActivity = Date()
+        pendingUploads[upload.transfer.id] = upload.transfer.total - upload.transfer.done
+        deadlines[ObjectIdentifier(connection)] = Date() + 60
         guard upload.transfer.done < upload.transfer.total else { return finish(upload, connection) }
         report(&upload.transfer)
         connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { [self] data, _, _, _ in
@@ -252,6 +285,7 @@ final class ShareServer {
 
     private func finish(_ upload: Upload, _ connection: NWConnection) {
         var upload = upload
+        pendingUploads[upload.transfer.id] = nil
         try? upload.handle.close()
         let file = Self.unusedName(upload.name, in: upload.folder)
         do { try FileManager.default.moveItem(at: upload.partial, to: file) } catch { return fail(upload, connection, 500, "Couldn't save the file") }
@@ -263,6 +297,7 @@ final class ShareServer {
 
     private func fail(_ upload: Upload, _ connection: NWConnection, _ status: Int, _ message: String) {
         var upload = upload
+        pendingUploads[upload.transfer.id] = nil
         try? upload.handle.close()
         try? FileManager.default.removeItem(at: upload.partial)
         upload.transfer.state = .failed
