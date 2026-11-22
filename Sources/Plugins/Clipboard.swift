@@ -42,12 +42,15 @@ final class ClipboardPlugin: Plugin, Page {
         try? FileManager.default.createDirectory(at: imagesDir, withIntermediateDirectories: true)
         file = dir.appendingPathComponent("clipboard.json")
         disk.async { [self] in
-            let saved = try? Data(contentsOf: file)
-            let loaded = saved.flatMap { try? JSONDecoder().decode([Clip].self, from: $0) }
+            guard Sealed.isReady else { return }
+            let sealed = Sealed.read(file)
+            let saved = sealed ?? (try? Data(contentsOf: file))
+            let loaded = (saved.flatMap { try? JSONDecoder().decode([Clip].self, from: $0) }
                 ?? saved.flatMap { try? JSONDecoder().decode([String].self, from: $0) }?.map(Clip.text)
-                ?? []
+                ?? []).map(sealingOldImage)
             DispatchQueue.main.async { [self] in
                 history = loaded
+                if sealed == nil { save() }
                 let timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.poll() }
                 timer.tolerance = 0.2
                 for case .image(let file, _, _, _) in history { makeThumbnail(file) }
@@ -98,7 +101,7 @@ final class ClipboardPlugin: Plugin, Page {
         }
     }
 
-    // A request copied from DevTools holds login cookies or tokens, and history is saved as plain JSON.
+    // A request copied from DevTools holds login cookies or tokens, which should not stay in history.
     private static func carriesCookies(_ text: String) -> Bool {
         text.range(of: #"(?im)(^|\s)(-b|--cookie) '|^\s*(-H ')?(cookie|authorization):|reddit_session="#, options: .regularExpression) != nil
     }
@@ -107,10 +110,18 @@ final class ClipboardPlugin: Plugin, Page {
         let isPNG = data.starts(with: [0x89, 0x50, 0x4E, 0x47])
         guard let bitmap = NSBitmapImageRep(data: data),
               let png = isPNG ? data : bitmap.representation(using: .png, properties: [:]) else { return nil }
-        let name = SHA256.hash(data: png).prefix(12).map { String(format: "%02x", $0) }.joined() + ".png"
+        let name = SHA256.hash(data: png).prefix(12).map { String(format: "%02x", $0) }.joined() + ".sealed"
         let url = imagesDir.appendingPathComponent(name)
-        if !FileManager.default.fileExists(atPath: url.path) { try? png.write(to: url) }
+        if !FileManager.default.fileExists(atPath: url.path) { Sealed.write(png, to: url) }
         return .image(file: name, width: bitmap.pixelsWide, height: bitmap.pixelsHigh, bytes: png.count)
+    }
+
+    private func sealingOldImage(_ clip: Clip) -> Clip {
+        guard case .image(let file, let width, let height, let bytes) = clip, file.hasSuffix(".png") else { return clip }
+        let old = imagesDir.appendingPathComponent(file), name = file.replacingOccurrences(of: ".png", with: ".sealed")
+        if let png = try? Data(contentsOf: old) { Sealed.write(png, to: imagesDir.appendingPathComponent(name)) }
+        try? FileManager.default.removeItem(at: old)
+        return .image(file: name, width: width, height: height, bytes: bytes)
     }
 
     private func add(_ clip: Clip) {
@@ -137,7 +148,7 @@ final class ClipboardPlugin: Plugin, Page {
         let snapshot = history
         disk.async { [imagesDir, file] in
             dropped.forEach { try? FileManager.default.removeItem(at: imagesDir.appendingPathComponent($0)) }
-            try? JSONEncoder().encode(snapshot).write(to: file, options: .atomic)
+            if let json = try? JSONEncoder().encode(snapshot) { Sealed.write(json, to: file) }
         }
     }
 
@@ -168,7 +179,7 @@ final class ClipboardPlugin: Plugin, Page {
             pasteboard.clearContents()
             pasteboard.setString(text, forType: .string)
         case .image(let file, _, _, _):
-            guard let png = try? Data(contentsOf: imagesDir.appendingPathComponent(file)) else { return false }
+            guard let png = Sealed.read(imagesDir.appendingPathComponent(file)) else { return false }
             pasteboard.clearContents()
             pasteboard.setData(png, forType: .png)
             pasteboard.setData(NSImage(data: png)?.tiffRepresentation, forType: .tiff)

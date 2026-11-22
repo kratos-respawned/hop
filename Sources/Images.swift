@@ -35,7 +35,8 @@ func framed(_ picture: NSImage) -> NSImage {
 
 func thumbnail(of url: URL, maxPixels: Int) -> NSImage? {
     let options = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: maxPixels] as CFDictionary
-    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+    let source = url.pathExtension == "sealed" ? Sealed.read(url).flatMap { CGImageSourceCreateWithData($0 as CFData, nil) } : CGImageSourceCreateWithURL(url as CFURL, nil)
+    guard let source,
           let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options) else { return nil }
     return NSImage(cgImage: image, size: NSSize(width: image.width / 2, height: image.height / 2))
 }
