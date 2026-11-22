@@ -1,10 +1,11 @@
 #!/bin/sh
 set -e
 cd "$(dirname "$0")"
-mkdir -p build/Hop.app/Contents/MacOS build/Hop.app/Contents/Resources
+mkdir -p build/Hop.app/Contents/MacOS build/Hop.app/Contents/Resources build/Hop.app/Contents/Library/LaunchAgents
 swiftc checks/main.swift Sources/Fuzzy.swift Sources/Plugins/Math.swift -o build/check && build/check
 cp Info.plist build/Hop.app/Contents/
 cp Resources/Hop.icns build/Hop.app/Contents/Resources/
+cp dev.hop.launcher.suite.plist build/Hop.app/Contents/Library/LaunchAgents/
 rm -rf build/Hop.dSYM
 swiftc -O -g Sources/*.swift Sources/Plugins/*.swift -o build/Hop
 # Function names live in build/Hop.dSYM so crash reports stay readable, the shipped binary goes without them.
