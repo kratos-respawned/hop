@@ -105,7 +105,7 @@ final class DownloadsPlugin: Plugin, SearchProvider, LinkOpener {
     private var details: [String: Details] = [:]
     private var lastProgressPost = Date.distantPast
     private var fetchClock: Timer?
-    /// Site cookies a browser handed over with a link, for posts only a signed-in account sees. Kept in memory only, until the download ends.
+    /// Site cookies Masks handed over on the suite line, for posts only a signed-in account sees. Kept in memory only, until the download ends.
     private var logins: [String: String] = [:]
     private let folder = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
     private let tools = ["/opt/homebrew/bin", "/usr/local/bin"]
@@ -122,9 +122,14 @@ final class DownloadsPlugin: Plugin, SearchProvider, LinkOpener {
 
     /// hop://download?url=<link> opens the download choices for any link, as browsers hand over only pages that play media.
     func page(for link: URLComponents) -> Page? {
-        guard let text = link.queryItems?.first(where: { $0.name == "url" })?.value, let url = URL(string: text), ["http", "https"].contains(url.scheme) else { return nil }
+        guard let text = link.queryItems?.first(where: { $0.name == "url" })?.value else { return nil }
+        return page(downloading: text, login: nil)
+    }
+
+    func page(downloading text: String, login: String?) -> Page? {
+        guard let url = URL(string: text), ["http", "https"].contains(url.scheme) else { return nil }
         if details[text]?.failure != nil { details[text] = nil }
-        if let cookies = link.queryItems?.first(where: { $0.name == "cookies" })?.value { logins[text] = cookies }
+        if let login { logins[text] = login }
         return QualityPage(name: "Download", placeholder: "Video or audio") { [self] in choices(text, url) }
     }
 

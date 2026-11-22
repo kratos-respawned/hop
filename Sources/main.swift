@@ -2,11 +2,14 @@ import AppKit
 import Carbon
 import ServiceManagement
 
+// launchd starts this same binary as the meeting point, under the job label.
+if ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"] == Suite.service { MeetingPoint.run() }
+
 let app = NSApplication.shared
 // The first file size shown loads ICU data for ~12 ms; pay it off the main thread.
 DispatchQueue.global(qos: .utility).async { _ = ByteCountFormatter.string(fromByteCount: 1, countStyle: .file) }
-let writing = WritingPlugin(), setup = SetupPlugin()
-let plugins = PluginManager([HopPlugin(), SettingsPlugin(), setup, writing, DecodePlugin(), DictionaryPlugin(), DownloadsPlugin(), CalculatorPlugin(), AppsPlugin(), ClipboardPlugin(), ClaudePlugin(), WorktreePlugin(), MetalPlugin(), PortPlugin(), ShelfPlugin(), SharePlugin(), WallpapersPlugin(), DigestPlugin()])
+let writing = WritingPlugin(), setup = SetupPlugin(), downloads = DownloadsPlugin()
+let plugins = PluginManager([HopPlugin(), SettingsPlugin(), setup, writing, DecodePlugin(), DictionaryPlugin(), downloads, CalculatorPlugin(), AppsPlugin(), ClipboardPlugin(), ClaudePlugin(), WorktreePlugin(), MetalPlugin(), PortPlugin(), ShelfPlugin(), SharePlugin(), WallpapersPlugin(), DigestPlugin()])
 let mainSearch = MainSearch(plugins: plugins)
 let launcher = Launcher(pages: [mainSearch] + plugins.pages)
 
@@ -33,4 +36,11 @@ NSUpdateDynamicServices()
 if !SetupPlugin.isDone { DispatchQueue.main.async { launcher.toggle(setup) } }
 
 try? SMAppService.mainApp.register()
+try? SMAppService.agent(plistName: Suite.service + ".plist").register()
+Suite.listen(to: ["dev.masks.browser"]) { request in
+    switch request {
+    case .download(let address, let login):
+        if let page = downloads.page(downloading: address.absoluteString, login: login) { launcher.present(page) }
+    }
+}
 app.run()
