@@ -63,11 +63,12 @@ final class WritingPlugin: NSObject, Plugin {
     private static func selection(in app: NSRunningApplication) -> (element: AXUIElement?, text: String?, bounds: CGRect?) {
         let found = focusedText(in: app.processIdentifier)
         let blank = found.text.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
-        return found.element == nil || blank ? (nil, copiedSelection(), nil) : found
+        return found.element == nil || blank ? (nil, copiedSelection(in: app.processIdentifier), nil) : found
     }
 
     // Chrome draws Google Docs on a canvas and shares nothing through Accessibility, so copy the selection with ⌘C instead.
-    private static func copiedSelection() -> String? {
+    private static func copiedSelection(in pid: pid_t) -> String? {
+        guard canCopy(in: pid) else { return nil }
         let pasteboard = NSPasteboard.general
         DispatchQueue.main.sync { ClipboardPlugin.quietUntil = Date() + 1.5 }
         let saved = clipboardSnapshot()
@@ -82,6 +83,20 @@ final class WritingPlugin: NSObject, Plugin {
         let text = pasteboard.string(forType: .string)
         restoreClipboard(saved)
         return text
+    }
+
+    /// ⌘C with nothing to copy makes the app beep, so it's only pressed while the app's Copy item is enabled.
+    private static func canCopy(in pid: pid_t) -> Bool {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.5)
+        guard let bar = attribute(app, kAXMenuBarAttribute) else { return true }
+        let items = children(bar as! AXUIElement).lazy.flatMap(children).flatMap(children)
+        let copy = items.first { attribute($0, kAXMenuItemCmdCharAttribute) as? String == "C" && attribute($0, kAXMenuItemCmdModifiersAttribute) as? Int == 0 }
+        return copy.map { attribute($0, kAXEnabledAttribute) as? Bool ?? true } ?? true
+    }
+
+    private static func children(_ element: AXUIElement) -> [AXUIElement] {
+        attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? []
     }
 
     private static func focusedText(in pid: pid_t) -> (element: AXUIElement?, text: String?, bounds: CGRect?) {
