@@ -85,6 +85,10 @@ final class Launcher: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTa
 
     func toggle(_ page: Page) {
         if panel.isVisible && shown === page { return hide() }
+        present(page)
+    }
+
+    func present(_ page: Page) {
         backStack = []
         show(page)
     }

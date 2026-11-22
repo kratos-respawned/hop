@@ -57,11 +57,6 @@ final class ClipboardPlugin: Plugin, Page {
 
     func register(in hop: PluginRegistry) {
         hop.add(page: self)
-        NotificationCenter.default.addObserver(forName: .forgetClip, object: nil, queue: .main) { [weak self] note in
-            guard let self, let text = note.object as? String else { return }
-            history.removeAll { $0 == .text(text) }
-            save()
-        }
     }
 
     func search(_ query: String) -> [Item] {
@@ -187,8 +182,4 @@ final class ClipboardPlugin: Plugin, Page {
         guard copy(clip) else { return }
         sendPaste()
     }
-}
-
-extension Notification.Name {
-    static let forgetClip = Notification.Name("HopForgetClip")
 }

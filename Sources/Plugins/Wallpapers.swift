@@ -26,9 +26,6 @@ final class WallpapersPlugin: Plugin, Page {
     private var downloading: String?
     private var failures: [String: String] = [:]
     private var wanted = ""
-    private var redditCookie: String?
-    private var redditExpired = false
-    private var redditProblem: String?
     private var feedErrors: [String: String] = [:]
     private let folder = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0].appendingPathComponent("Hop Wallpapers")
     private let bing = "Bing · picture of the day"
@@ -39,64 +36,43 @@ final class WallpapersPlugin: Plugin, Page {
 
     func register(in hop: PluginRegistry) {
         hop.add(page: self)
-        redditLibrary.load()
-        DispatchQueue.global(qos: .utility).async { [self] in
-            let cookie = RedditLogin.load()
-            DispatchQueue.main.async { [self] in redditCookie = cookie }
-        }
+        redditLibrary.refresh { [weak self] in self?.changed() }
     }
 
     func search(_ query: String) -> [Item] {
         let text = query.trimmingCharacters(in: .whitespaces)
         guard text.isEmpty else { return searchRows(text) }
-        for feed in [bing, topThisWeek, anime] + (redditReady ? [reddit] : []) where isStale(feed) { fetch(feed) }
+        for feed in [bing, topThisWeek, anime] where isStale(feed) { fetch(feed) }
         refreshRedditLibrary()
         func rows(_ feed: String) -> [Item] {
             if let error = feedErrors[feed], feeds[feed]?.isEmpty == true { return [Item(title: error, section: feed, icon: { tile("exclamationmark.triangle", .systemOrange) })] }
             return feeds[feed].map { visibleRows($0, in: feed) } ?? [Item(title: "Loading…", section: feed, icon: { tile("hourglass", .systemGray) })]
         }
-        return rows(bing) + (redditReady ? rows(reddit) : [connectRedditRow()]) + rows(topThisWeek) + rows(anime) + savedRows()
+        return rows(bing) + redditRows() + rows(topThisWeek) + rows(anime) + savedRows()
     }
 
-    private func connectRedditRow() -> Item {
-        let steps = """
-            Open reddit.com in Chrome while logged in. Open DevTools, go to Network and reload the page. Right-click the first request, the www.reddit.com page itself, and choose Copy as cURL. Then press Enter here.
-
-            Hop keeps only the reddit_session cookie, in your Keychain, then clears the clipboard and removes the copied request from clipboard history.
-            """
-        return Item(title: redditExpired ? "Reddit login expired, connect again" : "Connect Reddit", subtitle: redditProblem ?? "Copy a reddit.com request, then press Enter",
-                    action: "Connect", preview: .rich(NSAttributedString(string: steps, attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.labelColor])),
-                    section: "Reddit", opens: self, icon: { tile("person.badge.key", .systemOrange) }, run: { [self] in connectReddit() })
-    }
-
-    private func connectReddit() {
-        guard let cookie = takeFromClipboard(matching: #"(?<=reddit_session=)[^;'"\s]+"#) else {
-            redditProblem = "No reddit_session cookie there. Copy the www.reddit.com page request"
-            return changed()
+    private func redditRows() -> [Item] {
+        guard redditLibrary.thisWeek.isEmpty else {
+            loadThumbnails(of: redditLibrary.thisWeek)
+            return visibleRows(redditLibrary.thisWeek, in: reddit)
         }
-        redditCookie = cookie
-        redditExpired = false
-        redditProblem = nil
-        fetchedAt[reddit] = nil
-        changed()
-        DispatchQueue.global(qos: .utility).async { RedditLogin.save(cookie) }
+        return [problemRow(redditLibrary.problem ?? "Nothing on Reddit this week yet", section: reddit)]
     }
 
-    private var redditReady: Bool { redditCookie != nil && !redditExpired }
+    private func problemRow(_ problem: String, section: String) -> Item {
+        let why = """
+            Reddit blocks apps from reading it, so Masks reads it every 8 hours in its agents mask, which is signed in to Reddit, and saves the posts for Hop. Its job is called \(RedditLibrary.cron) and needs Masks to be open.
+            """
+        return Item(title: problem, preview: .rich(NSAttributedString(string: why, attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.labelColor])),
+                    section: section, icon: { tile("exclamationmark.triangle", .systemOrange) })
+    }
 
     private func refreshRedditLibrary() {
-        guard redditReady, let redditCookie else { return }
-        redditLibrary.refresh(cookie: redditCookie) { [self] loggedOut in
-            if loggedOut {
-                redditExpired = true
-                redditProblem = "Reddit answered HTTP 403"
-            }
-            changed()
-        }
+        redditLibrary.refresh { [weak self] in self?.changed() }
     }
 
     private func searchRows(_ text: String) -> [Item] {
-        let sources = (redditReady ? ["Reddit"] : []) + ["Wallhaven"]
+        let sources = ["Reddit", "Wallhaven"]
         wanted = text
         let groups = sources.map { source -> [Item] in
             let feed = "\(source) · \(text)"
@@ -106,11 +82,11 @@ final class WallpapersPlugin: Plugin, Page {
                 loadThumbnails(of: found)
                 let rows = visibleRows(found, in: feed)
                 let count = redditLibrary.wallpapers.count
-                let building = redditLibrary.isBuilding ? " Hop is still collecting more." : ""
+                if count == 0, let problem = redditLibrary.problem { return [problemRow(problem, section: feed)] }
                 let why = """
-                    Reddit doesn't let apps search, so Hop keeps its own library of \(count) top wallpapers from r/wallpapers, r/EarthPorn, r/spaceporn, r/Animewallpaper and others, and searches their titles, subreddits and flairs. Words like nature, space, art and anime match whole subreddits.\(building)
+                    Reddit doesn't let apps search, so Hop keeps its own library of \(count) top wallpapers from r/wallpapers, r/EarthPorn, r/spaceporn, r/Animewallpaper and others, and searches their titles and subreddits. Words like nature, space, art and anime match whole subreddits.
                     """
-                return rows.isEmpty ? [Item(title: redditLibrary.isBuilding && count == 0 ? "Collecting Reddit wallpapers…" : "Nothing on Reddit for \(text)",
+                return rows.isEmpty ? [Item(title: "Nothing on Reddit for \(text)",
                                             subtitle: "\(count) wallpapers in the library",
                                             preview: .rich(NSAttributedString(string: why, attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.labelColor])),
                                             section: feed, icon: { tile("photo", .systemGray) })] : rows
@@ -126,7 +102,7 @@ final class WallpapersPlugin: Plugin, Page {
         }
         let found = groups.filter { $0.contains { $0.run != nil } }
         let empty = groups.filter { !$0.contains { $0.run != nil } }
-        return (redditReady ? [] : [connectRedditRow()]) + Array(found.joined()) + Array(empty.joined())
+        return Array(found.joined()) + Array(empty.joined())
     }
 
     private func isStale(_ feed: String) -> Bool {
@@ -187,20 +163,14 @@ final class WallpapersPlugin: Plugin, Page {
         var request: URLRequest
         switch feed {
         case bing: request = URLRequest(url: URL(string: "https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=8&mkt=en-IN")!)
-        case reddit: request = RedditLibrary.request("/r/wallpaper+wallpapers+widescreenwallpaper/top.json?t=week&limit=100&raw_json=1", cookie: redditCookie ?? "")
         default: request = URLRequest(url: wallhavenURL(query: query, anime: feed == anime))
         }
         URLSession.shared.dataTask(with: request) { [self] data, response, _ in
             let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
-            let wallpapers = feed == bing ? bingWallpapers(json) : feed == reddit ? RedditLibrary.wallpapers(from: json) : wallhavenWallpapers(json)
+            let wallpapers = feed == bing ? bingWallpapers(json) : wallhavenWallpapers(json)
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            let loggedOut = feed == reddit && [401, 403].contains(status)
             DispatchQueue.main.async { [self] in
                 feedErrors[feed] = status == 200 ? nil : "\(feed.components(separatedBy: " · ")[0]) answered \(status == 0 ? "nothing, check the network" : "HTTP \(status)")"
-                if loggedOut {
-                    redditExpired = true
-                    redditProblem = feedErrors[feed]
-                }
                 if wallpapers.isEmpty && query == nil { fetchedAt[feed] = Date().addingTimeInterval(-6 * 3600 + 60) }
                 feeds[feed] = wallpapers
                 changed()

@@ -11,9 +11,7 @@ final class SetupPlugin: Plugin, Page {
     private var step = Step.permissions
     private var notificationsAllowed = false
     private var claudeReady = false
-    private var redditSaved = false
     private var notice = ""
-    private var redditProblem = ""
     private var watcher: Timer?
 
     static var isDone: Bool { UserDefaults.standard.bool(forKey: "setupDone") }
@@ -31,10 +29,8 @@ final class SetupPlugin: Plugin, Page {
         }
         DispatchQueue.global(qos: .utility).async { [self] in
             let claude = ClaudeSignIn.antPath.flatMap(ClaudeSignIn.token) != nil
-            let reddit = RedditLogin.load() != nil
             DispatchQueue.main.async { [self] in
                 claudeReady = claude
-                redditSaved = reddit
                 changed()
             }
         }
@@ -93,8 +89,6 @@ final class SetupPlugin: Plugin, Page {
 
     private var accountRows: [Item] {
         let claudeCommand = ClaudeSignIn.antPath == nil ? "brew install anthropics/tap/ant && ant auth login" : "ant auth login"
-        let redditSteps = "Open reddit.com in Chrome while logged in. Open DevTools, go to Network and reload. Right-click the www.reddit.com request, choose Copy as cURL, then press Enter here.\n\nHop keeps only the reddit_session cookie, in your Keychain, and clears the clipboard."
-        let connected = claudeReady || redditSaved
         return [
             Item(title: "Claude", subtitle: claudeReady ? "Signed in" : notice.isEmpty ? "Press Enter to copy the sign-in command" : notice,
                  badge: claudeReady ? "Signed in" : "Not set up", action: claudeReady ? "" : "Copy Command",
@@ -106,12 +100,7 @@ final class SetupPlugin: Plugin, Page {
                      notice = "Copied. Paste it in Terminal and sign in"
                  }),
             AIEngine.settingRow(opens: self),
-            Item(title: "Reddit", subtitle: redditSaved ? "Connected" : redditProblem.isEmpty ? "Copy a reddit.com request as cURL, then press Enter" : redditProblem,
-                 badge: redditSaved ? "Connected" : "Not set up", action: "Connect",
-                 preview: .rich(text("Reddit", ["Wallpapers and the morning digest read Reddit with your login.", redditSteps])),
-                 section: "Connect accounts, all optional", opens: self, icon: { tile("person.badge.key", .systemOrange) },
-                 run: { [self] in connectReddit() }),
-            Item(title: connected ? "Finish setup" : "Skip for now", subtitle: "You can come back any time by searching Set Up Hop",
+            Item(title: claudeReady ? "Finish setup" : "Skip for now", subtitle: "You can come back any time by searching Set Up Hop",
                  section: "Done", icon: { tile("checkmark.circle.fill", .systemGreen) },
                  run: { [self] in
                      UserDefaults.standard.set(true, forKey: "setupDone")
@@ -119,15 +108,6 @@ final class SetupPlugin: Plugin, Page {
                      notice = ""
                  }),
         ]
-    }
-
-    private func connectReddit() {
-        guard let cookie = takeFromClipboard(matching: #"(?<=reddit_session=)[^;'"\s]+"#) else {
-            return redditProblem = "No reddit_session cookie on the clipboard. Copy the www.reddit.com request"
-        }
-        redditProblem = ""
-        redditSaved = true
-        DispatchQueue.global(qos: .utility).async { RedditLogin.save(cookie) }
     }
 
     private func allowAccessibility() {

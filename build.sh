@@ -11,8 +11,9 @@ swiftc -O -g Sources/*.swift Sources/Plugins/*.swift -o build/Hop
 strip -x build/Hop
 mv build/Hop build/Hop.app/Contents/MacOS/Hop
 # A real identity keeps the same designated requirement across builds, so macOS keeps Hop's permissions.
+# The hardened runtime stops other programs from injecting code into Hop, which can hold a browser's site login while downloading.
 identity=$(security find-identity -v -p codesigning | awk '/Apple Development/ { print $2; exit }')
-codesign -s "${identity:--}" --force build/Hop.app
+codesign -s "${identity:--}" --force --options runtime build/Hop.app
 if [ "$1" = "install" ]; then
   pkill -x Hop || true
   rm -rf ~/Applications/Hop.app && mkdir -p ~/Applications && cp -R build/Hop.app ~/Applications/

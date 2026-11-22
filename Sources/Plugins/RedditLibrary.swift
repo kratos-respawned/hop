@@ -1,28 +1,46 @@
 import Foundation
 
+/// Reddit blocks apps from reading it, so Masks reads it on a schedule in its signed-in agents mask and Hop reads what Masks saved.
+enum MasksCron {
+    struct Entry {
+        let attributes: [String: String]
+        let text: String
+    }
+
+    struct Run {
+        let ranAt: Date
+        let passed: Bool
+        let entries: [Entry]
+        let failure: String?
+    }
+
+    static func latest(_ name: String) -> Run? {
+        let file = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/masks/crons/\(name)/latest.json")
+        guard let json = (try? Data(contentsOf: file)).flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }),
+              let ranAt = (json["ranAt"] as? String).flatMap(ISO8601DateFormatter().date(from:)) else { return nil }
+        let lists = (json["results"] as? [Any] ?? []).compactMap { $0 as? [[String: Any]] }
+        let entries = lists.joined().map { Entry(attributes: $0["attributes"] as? [String: String] ?? [:], text: $0["text"] as? String ?? "") }
+        let failure = (json["log"] as? String)?.components(separatedBy: "\n").first { $0.hasPrefix("     ") }?.trimmingCharacters(in: .whitespaces)
+        return Run(ranAt: ranAt, passed: json["passed"] as? Bool ?? false, entries: entries, failure: failure)
+    }
+
+    static func problem(_ name: String, _ run: Run?, every hours: Int) -> String? {
+        guard let run else { return "Masks hasn't read Reddit yet. Keep Masks open, its \(name) job runs every \(hours) hours" }
+        guard run.passed || !run.entries.isEmpty else { return "Masks couldn't read Reddit: \(run.failure ?? "its \(name) job failed")" }
+        return nil
+    }
+}
+
 final class RedditLibrary {
+    static let cron = "hop-reddit-wallpapers"
     private(set) var wallpapers: [Wallpaper] = []
-    private(set) var isBuilding = false
-    private var builtAt = Date.distantPast
-    private let file = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("Hop/reddit-library.json")
-    private static let groups = [("wallpaper", "wallpaper+wallpapers+widescreenwallpaper+WQHD_Wallpaper"), ("nature landscape", "EarthPorn+SkyPorn"),
-                                 ("space art fantasy", "spaceporn+ImaginaryLandscapes"), ("anime", "Animewallpaper")]
-    private static let lists = [("year", 3), ("all", 3), ("month", 1)]
-
-    private struct Saved: Codable {
-        let builtAt: Date
-        let wallpapers: [Wallpaper]
-    }
-
-    func load() {
-        DispatchQueue.global(qos: .utility).async { [self] in
-            guard let saved = (try? Data(contentsOf: file)).flatMap({ try? JSONDecoder().decode(Saved.self, from: $0) }) else { return }
-            DispatchQueue.main.async { [self] in
-                builtAt = saved.builtAt
-                wallpapers = saved.wallpapers + wallpapers
-            }
-        }
-    }
+    private(set) var thisWeek: [Wallpaper] = []
+    private(set) var problem: String?
+    private var readRun: Date?
+    private var isReading = false
+    private static let keywords = ["wallpaper": "wallpaper", "wallpapers": "wallpaper", "widescreenwallpaper": "wallpaper",
+                                   "earthporn": "nature landscape", "skyporn": "nature landscape sky",
+                                   "spaceporn": "space", "imaginarylandscapes": "art fantasy", "animewallpaper": "anime"]
 
     func matches(_ text: String) -> [Wallpaper] {
         let words = text.lowercased().split(separator: " ").map { $0.count > 3 && $0.hasSuffix("s") ? $0.dropLast() : $0 }
@@ -32,94 +50,59 @@ final class RedditLibrary {
         }
     }
 
-    func refresh(cookie: String, onChange: @escaping (_ loggedOut: Bool) -> Void) {
-        guard !isBuilding, Date().timeIntervalSince(builtAt) > 24 * 3600 else { return }
-        isBuilding = true
+    func refresh(onChange: @escaping () -> Void) {
+        guard !isReading else { return }
+        isReading = true
         DispatchQueue.global(qos: .utility).async { [self] in
-            var loggedOut = false
-            scrape: for (keywords, subreddits) in Self.groups {
-                for (range, pages) in Self.lists {
-                    var after = ""
-                    for _ in 0..<pages {
-                        let (body, status) = Self.get("/r/\(subreddits)/top.json?t=\(range)&limit=100&raw_json=1&after=\(after)", cookie: cookie)
-                        if [401, 403].contains(status) {
-                            loggedOut = true
-                            break scrape
-                        }
-                        let json = body as? [String: Any] ?? [:]
-                        let found = Self.wallpapers(from: json, keywords: keywords)
-                        DispatchQueue.main.async { [self] in
-                            wallpapers = unique(wallpapers + found)
-                            onChange(false)
-                        }
-                        after = (json["data"] as? [String: Any])?["after"] as? String ?? ""
-                        if after.isEmpty { break }
-                        Thread.sleep(forTimeInterval: 1)
-                    }
-                }
-            }
+            let run = MasksCron.latest(Self.cron)
+            let changed = run?.ranAt != readRun
+            let posts = changed ? run.map { Self.posts(in: $0.entries) } : nil
             DispatchQueue.main.async { [self] in
-                isBuilding = false
-                if !loggedOut { builtAt = Date() }
-                save()
-                onChange(loggedOut)
+                isReading = false
+                problem = MasksCron.problem(Self.cron, run, every: 8)
+                guard changed else { return }
+                readRun = run?.ranAt
+                if let posts {
+                    wallpapers = posts.map(\.wallpaper)
+                    let weekAgo = Date().addingTimeInterval(-7 * 24 * 3600)
+                    thisWeek = posts.filter { $0.created > weekAgo && $0.wallpaper.keywords.hasPrefix("wallpaper ") }.sorted { $0.score > $1.score }.map(\.wallpaper)
+                }
+                onChange()
             }
         }
     }
 
-    static func request(_ path: String, cookie: String) -> URLRequest {
-        var request = URLRequest(url: URL(string: "https://www.reddit.com" + path)!)
-        request.setValue("reddit_session=\(cookie)", forHTTPHeaderField: "Cookie")
-        request.setValue("macos:hop:0.1", forHTTPHeaderField: "User-Agent")
-        return request
-    }
-
-    static func wallpapers(from json: [String: Any], keywords: String = "") -> [Wallpaper] {
-        let posts = ((json["data"] as? [String: Any])?["children"] as? [[String: Any]] ?? []).compactMap { $0["data"] as? [String: Any] }
-        return posts.compactMap { post in
-            guard post["post_hint"] as? String == "image", let id = post["id"] as? String,
-                  let full = (post["url"] as? String).flatMap(URL.init(string:)),
-                  let image = ((post["preview"] as? [String: Any])?["images"] as? [[String: Any]])?.first,
-                  let source = image["source"] as? [String: Any], let width = source["width"] as? Int, let height = source["height"] as? Int,
-                  width >= 2560, width > height,
-                  let thumbnail = ((image["resolutions"] as? [[String: Any]])?.first { $0["width"] as? Int ?? 0 >= 640 }?["url"] as? String).flatMap(URL.init(string:))
-            else { return nil }
-            let subreddit = post["subreddit"] as? String ?? ""
-            return Wallpaper(id: "reddit-\(id)", title: post["title"] as? String ?? id,
-                             detail: "r/\(subreddit) · \((post["ups"] as? Int ?? 0).formatted()) upvotes",
-                             size: "\(width) × \(height)", thumbnail: thumbnail, full: full, nsfw: post["over_18"] as? Bool ?? false,
-                             keywords: [keywords, subreddit, post["link_flair_text"] as? String ?? ""].joined(separator: " "))
+    private static func posts(in entries: [MasksCron.Entry]) -> [(wallpaper: Wallpaper, created: Date, score: Int)] {
+        var previews: [String: URL] = [:]
+        for entry in entries {
+            if let src = entry.attributes["src"], let id = imageID(in: src), previews[id] == nil { previews[id] = URL(string: src) }
         }
-    }
-
-    static func get(_ path: String, cookie: String) -> (body: Any?, status: Int) {
-        let done = DispatchSemaphore(value: 0)
-        var result: (body: Any?, status: Int) = (nil, 0)
-        var wait = 0.0
-        URLSession.shared.dataTask(with: request(path, cookie: cookie)) { data, response, _ in
-            let response = response as? HTTPURLResponse
-            result = (data.flatMap { try? JSONSerialization.jsonObject(with: $0) }, response?.statusCode ?? 0)
-            if Double(response?.value(forHTTPHeaderField: "x-ratelimit-remaining") ?? "") ?? 99 < 2 || result.status == 429 {
-                wait = (Double(response?.value(forHTTPHeaderField: "x-ratelimit-reset") ?? "") ?? 60) + 1
-            }
-            done.signal()
-        }.resume()
-        done.wait()
-        guard wait > 0 else { return result }
-        Thread.sleep(forTimeInterval: wait)
-        return result.status == 429 ? get(path, cookie: cookie) : result
-    }
-
-    private func unique(_ wallpapers: [Wallpaper]) -> [Wallpaper] {
         var seen = Set<String>()
-        return wallpapers.filter { seen.insert($0.id).inserted }
+        let dates = ISO8601DateFormatter()
+        return entries.compactMap { entry in
+            let post = entry.attributes
+            guard post["post-type"] == "image", let id = post["id"]?.replacingOccurrences(of: "t3_", with: ""), seen.insert(id).inserted,
+                  let title = post["post-title"], let full = post["content-href"].flatMap(URL.init(string:)),
+                  let thumbnail = imageID(in: full.absoluteString).flatMap({ previews[$0] }),
+                  let size = resolution(in: title), size.width >= 2560, size.width > size.height else { return nil }
+            let subreddit = post["subreddit-name"] ?? ""
+            let score = Int(post["score"] ?? "") ?? 0
+            let wallpaper = Wallpaper(id: "reddit-\(id)", title: title, detail: "r/\(subreddit) · \(score.formatted()) upvotes",
+                                      size: "\(size.width) × \(size.height)", thumbnail: thumbnail, full: full, nsfw: post["nsfw"] != nil,
+                                      keywords: "\(keywords[subreddit.lowercased()] ?? "") \(subreddit)")
+            let created = post["created-timestamp"].flatMap { dates.date(from: $0.prefix(19) + "Z") } ?? .distantPast
+            return (wallpaper, created, score)
+        }
     }
 
-    private func save() {
-        let saved = Saved(builtAt: builtAt, wallpapers: wallpapers)
-        DispatchQueue.global(qos: .utility).async { [file] in
-            try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? JSONEncoder().encode(saved).write(to: file, options: .atomic)
-        }
+    /// i.redd.it/<id>.png and its signed preview, preview.redd.it/<title>-v0-<id>.png, share the image id.
+    private static func imageID(in link: String) -> String? {
+        link.range(of: #"(?<=-v0-|/)[a-z0-9]{8,}(?=\.(png|jpe?g|webp))"#, options: .regularExpression).map { String(link[$0]) }
+    }
+
+    private static func resolution(in title: String) -> (width: Int, height: Int)? {
+        guard let found = title.range(of: #"\d{3,5} ?[x×X] ?\d{3,5}"#, options: .regularExpression) else { return nil }
+        let numbers = title[found].split { !$0.isNumber }.compactMap { Int($0) }
+        return numbers.count == 2 ? (numbers[0], numbers[1]) : nil
     }
 }

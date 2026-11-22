@@ -15,19 +15,21 @@ final class DownloadsPage: Page {
 final class QualityPage: Page {
     let name: String
     let icon = tile("slider.horizontal.3", .systemRed)
-    let placeholder = "Pick a quality"
+    let placeholder: String
     let actionName = "Download"
     private let rows: () -> [Item]
 
-    init(name: String, rows: @escaping () -> [Item]) {
+    init(name: String, placeholder: String = "Pick a quality", rows: @escaping () -> [Item]) {
         self.name = name
+        self.placeholder = placeholder
         self.rows = rows
     }
 
     func search(_ query: String) -> [Item] { rows().filter { query.isEmpty || fuzzyScore(query, $0.title) != nil } }
 }
 
-final class DownloadsPlugin: Plugin, SearchProvider {
+final class DownloadsPlugin: Plugin, SearchProvider, LinkOpener {
+    let linkName = "download"
     private let downloadsPage = DownloadsPage()
 
     private enum Kind: String {
@@ -94,11 +96,17 @@ final class DownloadsPlugin: Plugin, SearchProvider {
         var thumbnail: NSImage?
         var sponsorSeconds: Double?
         var qualities: [Quality]?
+        var failure: String?
+        let asked = Date()
+        var isFetching: Bool { qualities == nil && failure == nil }
     }
 
     private var downloads: [Download] = []
     private var details: [String: Details] = [:]
     private var lastProgressPost = Date.distantPast
+    private var fetchClock: Timer?
+    /// Site cookies a browser handed over with a link, for posts only a signed-in account sees. Kept in memory only, until the download ends.
+    private var logins: [String: String] = [:]
     private let folder = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
     private let tools = ["/opt/homebrew/bin", "/usr/local/bin"]
     private lazy var ytDlp = tools.map { $0 + "/yt-dlp" }.first(where: FileManager.default.isExecutableFile)
@@ -109,12 +117,26 @@ final class DownloadsPlugin: Plugin, SearchProvider {
         downloadsPage.plugin = self
         hop.add(search: self)
         hop.add(page: downloadsPage)
+        hop.add(link: self)
+    }
+
+    /// hop://download?url=<link> opens the download choices for any link, as browsers hand over only pages that play media.
+    func page(for link: URLComponents) -> Page? {
+        guard let text = link.queryItems?.first(where: { $0.name == "url" })?.value, let url = URL(string: text), ["http", "https"].contains(url.scheme) else { return nil }
+        if details[text]?.failure != nil { details[text] = nil }
+        if let cookies = link.queryItems?.first(where: { $0.name == "cookies" })?.value { logins[text] = cookies }
+        return QualityPage(name: "Download", placeholder: "Video or audio") { [self] in choices(text, url) }
     }
 
     func search(_ query: String) -> [Item] {
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard ytDlp != nil, !text.contains(" "), let url = URL(string: text), ["http", "https"].contains(url.scheme),
               let host = url.host?.lowercased(), Self.videoSites.contains(where: { host == $0 || host.hasSuffix("." + $0) }) else { return [] }
+        return choices(text, url)
+    }
+
+    private func choices(_ text: String, _ url: URL) -> [Item] {
+        guard ytDlp != nil else { return [] }
         if details[text] == nil { fetchDetails(text, youTubeID: youTubeID(url)) }
         let info = details[text] ?? Details()
         let kinds: [Kind] = youTubeID(url) == nil ? [.video, .audio] : [.video, .sponsorsCut, .sponsorChapters, .audio]
@@ -145,7 +167,7 @@ final class DownloadsPlugin: Plugin, SearchProvider {
                  opens: downloadsPage, icon: { tile(kind == .audio ? "music.note" : "film", .systemRed) },
                  run: { [self] in start(link, kind: kind, quality: quality) })
         }
-        if kind != .audio && details[link]?.qualities == nil {
+        if kind != .audio && details[link]?.isFetching != false {
             rows.append(Item(title: "Fetching the other qualities…", icon: { tile("hourglass", .systemGray) }))
         }
         return rows
@@ -198,9 +220,21 @@ final class DownloadsPlugin: Plugin, SearchProvider {
 
     private func fetchDetails(_ link: String, youTubeID: String?) {
         details[link] = Details()
+        fetchInfo(link)
+        countSecondsWhileFetching()
+        guard let youTubeID else { return }
+        sponsorSeconds(for: youTubeID) { [self] seconds in details[link]?.sponsorSeconds = seconds; changed() }
+    }
+
+    /// YouTube now and then refuses or stalls a lookup, so one that fails or takes over 45s runs once more before giving up.
+    private func fetchInfo(_ link: String, isRetry: Bool = false) {
         guard let ytDlp else { return }
-        run(ytDlp, ["-J", "--no-playlist", "--skip-download", "--no-warnings", link]) { [self] output, _ in
-            guard let json = try? JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any] else { return }
+        let lookup = run(ytDlp, ["-J", "--no-playlist", "--skip-download", "--no-warnings", link], login: logins[link]) { [self] output, errors in
+            guard let json = try? JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any] else {
+                if !isRetry { return fetchInfo(link, isRetry: true) }
+                details[link]?.failure = errors.split(separator: "\n").last { $0.hasPrefix("ERROR") }.map { String($0.dropFirst(7)) } ?? "The site didn't answer in time"
+                return changed()
+            }
             var info = details[link] ?? Details()
             info.title = json["title"] as? String ?? ""
             info.channel = json["channel"] as? String ?? json["uploader"] as? String ?? ""
@@ -215,8 +249,19 @@ final class DownloadsPlugin: Plugin, SearchProvider {
                 }.resume()
             }
         }
-        guard let youTubeID else { return }
-        sponsorSeconds(for: youTubeID) { [self] seconds in details[link]?.sponsorSeconds = seconds; changed() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 45) { if lookup.isRunning { lookup.terminate() } }
+    }
+
+    private func countSecondsWhileFetching() {
+        guard fetchClock == nil else { return }
+        fetchClock = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] clock in
+            guard let self else { return clock.invalidate() }
+            if !details.values.contains(where: \.isFetching) {
+                clock.invalidate()
+                fetchClock = nil
+            }
+            changed()
+        }
     }
 
     // SponsorBlock's private lookup: only the first 4 hex characters of the video ID's SHA-256 leave the Mac.
@@ -242,9 +287,11 @@ final class DownloadsPlugin: Plugin, SearchProvider {
             page.append(NSAttributedString(attachment: attachment))
             page.append(NSAttributedString(string: "\n\n"))
         }
-        let title = info.title.isEmpty ? "Fetching video details…" : info.title
+        let waited = Int(-info.asked.timeIntervalSinceNow)
+        let title = !info.title.isEmpty ? info.title : info.failure != nil ? "Couldn't fetch the video details" : "Fetching video details… \(waited)s"
         page.append(NSAttributedString(string: title + "\n", attributes: [.font: NSFont.systemFont(ofSize: 17, weight: .semibold), .foregroundColor: NSColor.labelColor]))
-        let meta = [info.channel, info.duration].filter { !$0.isEmpty }.joined(separator: " · ")
+        let meta = info.failure.map { "\($0). Downloading may still work, at the best quality up to 1080p." }
+            ?? [info.channel, info.duration].filter { !$0.isEmpty }.joined(separator: " · ")
         if !meta.isEmpty { page.append(NSAttributedString(string: meta + "\n", attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor])) }
         if youTube {
             let sponsors = info.sponsorSeconds.map { $0 < 1 ? "SponsorBlock: no sponsor segments reported" : "SponsorBlock: \(minutes($0)) of sponsors and self-promo" }
@@ -269,7 +316,7 @@ final class DownloadsPlugin: Plugin, SearchProvider {
                                         "--progress-template", "download:HOP %(progress._percent_str)s · %(progress._speed_str)s · %(progress._eta_str)s left",
                                         "--print", "before_dl:HOPTITLE %(title)s", "--print", "after_move:HOPFILE %(filepath)s",
                                         "-P", folder.path, "-o", "%(title).150B [%(id)s]\(quality.fileSuffix)\(kind.fileSuffix).%(ext)s", link]
-        download.process = run(ytDlp, arguments, eachLine: { [self] line in
+        download.process = run(ytDlp, arguments, login: logins[link], eachLine: { [self] line in
             if line.hasPrefix("HOPTITLE ") { download.title = String(line.dropFirst(9)) }
             else if line.hasPrefix("HOPFILE ") { download.file = URL(fileURLWithPath: String(line.dropFirst(8))) }
             else if line.hasPrefix("HOP ") { download.progress = line.dropFirst(4).replacingOccurrences(of: "  ", with: " ").trimmingCharacters(in: .whitespaces) }
@@ -286,6 +333,7 @@ final class DownloadsPlugin: Plugin, SearchProvider {
             if download.file == nil && download.failure == nil {
                 download.failure = errors.split(separator: "\n").last { $0.hasPrefix("ERROR") }.map { String($0.dropFirst(7)) } ?? "yt-dlp stopped"
             }
+            logins[link] = nil
             notify(download)
             changed()
         }
@@ -293,10 +341,17 @@ final class DownloadsPlugin: Plugin, SearchProvider {
     }
 
     @discardableResult
-    private func run(_ tool: String, _ arguments: [String], eachLine: ((String) -> Void)? = nil, then done: @escaping (String, String) -> Void) -> Process {
+    private func run(_ tool: String, _ arguments: [String], login: String? = nil, eachLine: ((String) -> Void)? = nil, then done: @escaping (String, String) -> Void) -> Process {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: tool)
         process.arguments = arguments
+        var pair: [Int32] = [-1, -1]
+        if login != nil, socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 {
+            // The cookies reach yt-dlp through a socket, never a file other programs could read, and it writes them back there on exit.
+            // Config files and plugins are skipped, since anything could put one there that saves or sends the cookies.
+            process.standardInput = FileHandle(fileDescriptor: pair[1], closeOnDealloc: false)
+            process.arguments = ["--ignore-config", "--no-plugin-dirs", "--cookies", "/dev/stdin"] + arguments
+        }
         var environment = ProcessInfo.processInfo.environment
         environment["PATH"] = (tools + [environment["PATH"] ?? "/usr/bin:/bin"]).joined(separator: ":")
         process.environment = environment
@@ -330,6 +385,17 @@ final class DownloadsPlugin: Plugin, SearchProvider {
             }
         }
         do { try process.run() } catch { done("", "ERROR: \(error.localizedDescription)") }
+        if let login, pair[0] >= 0 {
+            close(pair[1])
+            var on: Int32 = 1
+            setsockopt(pair[0], SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+            DispatchQueue.global(qos: .utility).async {
+                let ours = FileHandle(fileDescriptor: pair[0], closeOnDealloc: true)
+                try? ours.write(contentsOf: Data(login.utf8))
+                shutdown(pair[0], SHUT_WR)
+                _ = try? ours.readToEnd()
+            }
+        }
         return process
     }
 

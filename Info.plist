@@ -10,6 +10,13 @@
     <key>CFBundleShortVersionString</key><string>0.1</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key><string>Hop Links</string>
+            <key>CFBundleURLSchemes</key><array><string>hop</string></array>
+        </dict>
+    </array>
     <key>NSServices</key>
     <array>
         <dict>

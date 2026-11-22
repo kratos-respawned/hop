@@ -17,6 +17,17 @@ for page in plugins.pages {
     if let hotkey = page.hotkey { HotKeys.add(hotkey) { launcher.toggle(page) } }
 }
 
+final class Links: NSObject {
+    @objc func open(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
+        guard let url = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue.flatMap(URL.init(string:)),
+              let page = plugins.page(for: url) else { return }
+        launcher.present(page)
+    }
+}
+let links = Links()
+NSAppleEventManager.shared().setEventHandler(links, andSelector: #selector(Links.open(_:reply:)),
+                                             forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))
+
 app.servicesProvider = writing
 NSUpdateDynamicServices()
 if !SetupPlugin.isDone { DispatchQueue.main.async { launcher.toggle(setup) } }

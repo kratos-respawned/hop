@@ -64,6 +64,7 @@ final class DigestPlugin: Plugin, Page {
     }
 
     // shortcut: fixed subreddits and a fixed 8 AM start, make them settings once the digest has proven useful.
+    private static let cron = "hop-reddit-digest"
     private static let subreddits = ["SideProject", "AppIdeas", "productivity", "IndianStockMarket", "personalfinanceindia", "investing", "stocks"]
     private static let morningHour = 8
     private static let sections = [("App ideas", "lightbulb.fill", NSColor.systemOrange), ("Productivity", "checklist", .systemBlue),
@@ -178,9 +179,8 @@ final class DigestPlugin: Plugin, Page {
         changed()
         DispatchQueue.global(qos: .utility).async { [self] in
             let made = Result { () throws -> Digest in
-                guard let cookie = RedditLogin.load() else { throw Failure("Connect Reddit in Wallpapers first") }
                 guard let token = ClaudeSignIn.token(ant) else { throw Failure("Not signed in to Claude. Run ant auth login in Terminal") }
-                let (posts, text) = try collectPosts(cookie: cookie)
+                let (posts, text) = try collectPosts()
                 DispatchQueue.main.async { [self] in
                     askedClaudeAt = Date()
                     progress = "Asking Claude about \(posts.count) posts…"
@@ -205,32 +205,30 @@ final class DigestPlugin: Plugin, Page {
         }
     }
 
-    private func collectPosts(cookie: String) throws -> (posts: [Post], text: String) {
+    private func collectPosts() throws -> (posts: [Post], text: String) {
+        let run = MasksCron.latest(Self.cron)
+        if let problem = MasksCron.problem(Self.cron, run, every: 2) { throw Failure(problem) }
+        guard let run, Date().timeIntervalSince(run.ranAt) < 12 * 3600 else { throw Failure("Masks hasn't read Reddit today. Keep Masks open, its \(Self.cron) job runs every 2 hours") }
         var posts: [Post] = []
         var text = ""
-        for subreddit in Self.subreddits {
-            let (body, status) = RedditLibrary.get("/r/\(subreddit)/top.json?t=day&limit=8&raw_json=1", cookie: cookie)
-            guard status == 200 else { throw Failure(status == 0 ? "Reddit didn't answer, check the network" : "r/\(subreddit) answered HTTP \(status)") }
-            let listing = (((body as? [String: Any])?["data"] as? [String: Any])?["children"] as? [[String: Any]] ?? []).compactMap { $0["data"] as? [String: Any] }
-            for entry in listing where entry["stickied"] as? Bool != true && entry["over_18"] as? Bool != true {
-                guard let id = entry["id"] as? String, let permalink = entry["permalink"] as? String,
-                      let link = URL(string: "https://www.reddit.com" + permalink) else { continue }
-                Thread.sleep(forTimeInterval: 1)
-                let (thread, _) = RedditLibrary.get("/comments/\(id).json?limit=3&depth=1&sort=top&raw_json=1", cookie: cookie)
-                let replies = (((thread as? [[String: Any]])?.last?["data"] as? [String: Any])?["children"] as? [[String: Any]] ?? [])
-                    .compactMap { ($0["data"] as? [String: Any])?["body"] as? String }.prefix(3)
-                let post = Post(id: id, subreddit: subreddit, link: link, upvotes: entry["ups"] as? Int ?? 0, comments: entry["num_comments"] as? Int ?? 0)
-                posts.append(post)
-                text += """
-                    <post id="\(id)" subreddit="\(subreddit)" upvotes="\(post.upvotes)" comments="\(post.comments)">
-                    \(entry["title"] as? String ?? "")
-                    \(String((entry["selftext"] as? String ?? "").prefix(1500)))
-                    Top comments:
-                    \(replies.map { "- " + String($0.prefix(400)) }.joined(separator: "\n"))
-                    </post>
+        var perSubreddit: [String: Int] = [:]
+        for entry in run.entries {
+            let post = entry.attributes
+            guard post["nsfw"] == nil, let id = post["id"]?.replacingOccurrences(of: "t3_", with: ""), let permalink = post["permalink"],
+                  let link = URL(string: "https://www.reddit.com" + permalink), !posts.contains(where: { $0.id == id }) else { continue }
+            let subreddit = post["subreddit-name"] ?? ""
+            perSubreddit[subreddit, default: 0] += 1
+            guard perSubreddit[subreddit]! <= 8 else { continue }
+            let found = Post(id: id, subreddit: subreddit, link: link, upvotes: Int(post["score"] ?? "") ?? 0, comments: Int(post["comment-count"] ?? "") ?? 0)
+            posts.append(found)
+            let body = entry.text.components(separatedBy: "\n").filter { !$0.hasPrefix("[hidden from people") }.joined(separator: "\n")
+            text += """
+                <post id="\(id)" subreddit="\(subreddit)" upvotes="\(found.upvotes)" comments="\(found.comments)">
+                \(post["post-title"] ?? "")
+                \(String(body.prefix(1500)))
+                </post>
 
-                    """
-            }
+                """
         }
         guard !posts.isEmpty else { throw Failure("Reddit had no posts today") }
         return (posts, text)
